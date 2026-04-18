@@ -130,6 +130,7 @@ infrarag/
 
 # How to start InfraRAG
 
+```bash
 git clone https://github.com/ashroy6/infrarag.git
 cd infrarag
 docker compose up -d
