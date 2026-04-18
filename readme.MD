@@ -323,7 +323,7 @@ Grafana can be connected to Prometheus as a data source to visualize:
 - backend availability
 - API activity over time
 
-```
+
 ## API Endpoints
 
 ### `GET /`
