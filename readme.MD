@@ -128,6 +128,17 @@ infrarag/
 
 ```
 
+# How to start InfraRAG
+
+git clone https://github.com/ashroy6/infrarag.git
+cd infrarag
+docker compose up -d
+docker compose exec ollama ollama pull nomic-embed-text
+docker compose exec ollama ollama pull llama3.2:3b
+docker compose exec backend python app/ingest.py repos/ml_data_pipeline/src repos/ml_data_pipeline/README.md
+
+## Then opem
+http://localhost:8080
 
 # Folder Roles
 
