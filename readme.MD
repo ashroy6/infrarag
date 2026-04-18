@@ -376,7 +376,7 @@ Current MVP limitations include:
 - monitoring dashboards still need to be built in Grafana
 - very large corpora need better curation and tuning
 
-```
+
 ## Why This Project Matters
 
 InfraRAG is not just a chatbot.
