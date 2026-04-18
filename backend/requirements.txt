@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+qdrant-client
+requests
+pydantic
+prometheus-client
+python-multipart

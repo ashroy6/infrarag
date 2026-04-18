@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InfraRAG</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 0 16px;
+    }
+    h1 {
+      margin-bottom: 20px;
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    input {
+      flex: 1;
+      padding: 10px;
+      font-size: 16px;
+    }
+    button {
+      padding: 10px 16px;
+      cursor: pointer;
+    }
+    pre {
+      background: #f4f4f4;
+      padding: 16px;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+  </style>
+</head>
+<body>
+  <h1>InfraRAG</h1>
+
+  <div class="row">
+    <input id="question" type="text" placeholder="Ask a DevOps / Terraform / AWS question" />
+    <button onclick="askQuestion()">Ask</button>
+  </div>
+
+  <pre id="output">Response will appear here...</pre>
+
+  <script>
+    async function askQuestion() {
+      const q = document.getElementById("question").value.trim();
+      const output = document.getElementById("output");
+
+      if (!q) {
+        output.textContent = "Please enter a question.";
+        return;
+      }
+
+      output.textContent = "Loading...";
+
+      try {
+        const res = await fetch(`/api/ask?q=${encodeURIComponent(q)}`);
+        const data = await res.json();
+        output.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        output.textContent = "Request failed: " + err.message;
+      }
+    }
+  </script>
+</body>
+</html>
