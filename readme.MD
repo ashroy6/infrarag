@@ -139,7 +139,7 @@ docker compose exec ollama ollama pull llama3.2:3b
 docker compose exec backend python app/ingest.py repos/ml_data_pipeline/src repos/ml_data_pipeline/README.md
 
 ```
-## Then open
+## Then Open
 http://localhost:8080
 
 # Folder Roles
