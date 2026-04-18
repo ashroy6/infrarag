@@ -1,0 +1,52 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Git
+*.swp
+*.swo
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# FastAPI / backend artifacts
+*.log
+
+# Node / frontend
+node_modules/
+dist/
+build/
+
+# Docker
+*.tar
+
+# Monitoring / runtime data
+prometheus_data/
+grafana_data/
+
+# Vector DB / embeddings / local knowledge indexes
+qdrant_storage/
+chroma/
+vectorstore/
+*.sqlite3
+
+# Uploaded/generated docs or temp data
+tmp/
+temp/
+*.tmp
+
+# Mac/Linux misc
+*.bak
