@@ -399,3 +399,7 @@ This makes it a strong project for demonstrating:
 - containerized application architecture
 - local LLM integration
 - production-style system thinking
+
+## Screeshots
+
+![InfraRAG Architecture](infrarag-screeshot.png)
