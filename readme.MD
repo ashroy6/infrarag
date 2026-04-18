@@ -18,7 +18,7 @@ The goal is to turn raw documentation, code repositories, runbooks, Terraform mo
 
 ## Architecture Diagram
 
-![InfraRAG Architecture](sandbox:/mnt/data/a_3_3d_rendered_architectural_diagram_titled_llm.png)
+![InfraRAG Architecture](architectural-diagram-infrarag.png)
 
 ---
 
