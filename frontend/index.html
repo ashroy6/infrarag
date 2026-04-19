@@ -119,6 +119,30 @@
       margin-bottom: 10px;
       display: block;
     }
+
+    .hint {
+      font-size: 15px;
+      color: #666;
+      margin-top: 6px;
+    }
+
+    .output-answer {
+      color: #8b0000;
+      font-weight: 600;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      margin-bottom: 18px;
+    }
+
+    .output-section-title {
+      font-size: 16px;
+      font-weight: bold;
+      margin-bottom: 8px;
+    }
+
+    .output-citations {
+      color: inherit;
+    }
   </style>
 </head>
 <body>
@@ -127,7 +151,7 @@
   </div>
 
   <h1>InfraRAG</h1>
-  <p class="subtitle">Ask questions over your DevOps, Terraform, AWS, and engineering docs. You can also upload a file and ingest it.</p>
+  <p class="subtitle">Ask questions over your DevOps, Terraform, AWS, and engineering docs. You can also upload a file or a whole folder and ingest it.</p>
 
   <div class="card">
     <label class="label" for="question">Ask a question</label>
@@ -141,9 +165,19 @@
     <label class="label" for="fileInput">Upload and ingest a file</label>
     <div class="row">
       <input id="fileInput" type="file" />
-      <button onclick="uploadFile()">Upload</button>
+      <button onclick="uploadFile()">Upload File</button>
     </div>
-    <div id="uploadStatus" class="status">No file uploaded yet.</div>
+    <div class="status" id="uploadStatus">No single file uploaded yet.</div>
+  </div>
+
+  <div class="card">
+    <label class="label" for="folderInput">Upload and ingest a folder</label>
+    <div class="row">
+      <input id="folderInput" type="file" webkitdirectory directory multiple />
+      <button onclick="uploadFolder()">Upload Folder</button>
+    </div>
+    <div class="hint">Select a whole folder. Supported files inside it will be parsed and ingested.</div>
+    <div class="status" id="folderStatus">No folder uploaded yet.</div>
   </div>
 
   <div class="card">
@@ -152,6 +186,37 @@
   </div>
 
   <script>
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function renderAskOutput(data) {
+      const output = document.getElementById("output");
+      const answer = data.answer || "";
+      const citations = Array.isArray(data.citations) ? data.citations : [];
+
+      let citationsHtml = "<div class='output-citations'>No citations returned.</div>";
+
+      if (citations.length > 0) {
+        citationsHtml = `
+<div class="output-citations">${escapeHtml(JSON.stringify(citations, null, 2))}</div>
+`;
+      }
+
+      output.innerHTML = `
+<div class="output-section-title">Answer</div>
+<div class="output-answer">${escapeHtml(answer)}</div>
+
+<div class="output-section-title">Citations</div>
+${citationsHtml}
+`;
+    }
+
     async function askQuestion() {
       const q = document.getElementById("question").value.trim();
       const output = document.getElementById("output");
@@ -166,7 +231,13 @@
       try {
         const res = await fetch(`/api/ask?q=${encodeURIComponent(q)}`);
         const data = await res.json();
-        output.textContent = JSON.stringify(data, null, 2);
+
+        if (!res.ok) {
+          output.textContent = JSON.stringify(data, null, 2);
+          return;
+        }
+
+        renderAskOutput(data);
       } catch (err) {
         output.textContent = "Request failed: " + err.message;
       }
@@ -208,6 +279,53 @@
       } catch (err) {
         uploadStatus.textContent = "Upload failed.";
         output.textContent = "Upload request failed: " + err.message;
+      }
+    }
+
+    async function uploadFolder() {
+      const folderInput = document.getElementById("folderInput");
+      const folderStatus = document.getElementById("folderStatus");
+      const output = document.getElementById("output");
+
+      if (!folderInput.files || folderInput.files.length === 0) {
+        folderStatus.textContent = "Please choose a folder first.";
+        return;
+      }
+
+      const files = Array.from(folderInput.files);
+      const firstName = files[0].webkitRelativePath || files[0].name;
+      const folderName = firstName.split("/")[0] || "folder_upload";
+
+      const formData = new FormData();
+      formData.append("folder_name", folderName);
+
+      for (const file of files) {
+        const relativeName = file.webkitRelativePath || file.name;
+        formData.append("files", file, relativeName);
+      }
+
+      folderStatus.textContent = `Uploading folder ${folderName} with ${files.length} files...`;
+      output.textContent = "Processing folder upload...";
+
+      try {
+        const res = await fetch("/api/upload-folder", {
+          method: "POST",
+          body: formData
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          folderStatus.textContent = "Folder upload failed.";
+          output.textContent = JSON.stringify(data, null, 2);
+          return;
+        }
+
+        folderStatus.textContent = `Folder upload complete: ${folderName} (${files.length} files)`;
+        output.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        folderStatus.textContent = "Folder upload failed.";
+        output.textContent = "Folder upload request failed: " + err.message;
       }
     }
   </script>

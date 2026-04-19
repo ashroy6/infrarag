@@ -4,7 +4,7 @@ import os
 import sqlite3
 
 import requests
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
@@ -13,13 +13,13 @@ from app.metadata_db import MetadataDB
 from app.pipeline import ingest_paths
 from app.qdrant_client import delete_points_by_source_id
 from app.retrieve import retrieve_context
-from app.uploads import save_upload
+from app.uploads import save_upload, save_uploads
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2:3b")
 METADATA_DB_PATH = os.getenv("METADATA_DB_PATH", "/app/data/infrarag.db")
 
-app = FastAPI(title="InfraRAG Backend", version="2.1.0")
+app = FastAPI(title="InfraRAG Backend", version="2.3.0")
 
 REQUEST_COUNT = Counter("infrarag_requests_total", "Total API requests", ["method", "endpoint"])
 REQUEST_LATENCY = Histogram("infrarag_request_latency_seconds", "Request latency", ["endpoint"])
@@ -174,6 +174,29 @@ async def upload_file(file: UploadFile = File(...)):
         )
 
 
+@app.post("/upload-folder")
+async def upload_folder(
+    files: list[UploadFile] = File(...),
+    folder_name: str = Form("folder_upload"),
+):
+    try:
+        base_dir, saved_paths = await save_uploads(files, folder_name=folder_name)
+        result = ingest_paths([base_dir], source_type="upload")
+
+        return {
+            "message": "Folder upload processed",
+            "folder_name": folder_name,
+            "saved_base_dir": base_dir,
+            "saved_file_count": len(saved_paths),
+            "ingest_result": result,
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"folder upload failed: {str(e)}"}
+        )
+
+
 @app.post("/ingest/local")
 def ingest_local(paths: list[str]):
     try:
@@ -275,6 +298,56 @@ def admin_sources(
         return JSONResponse(
             status_code=500,
             content={"error": f"admin sources failed: {str(e)}"}
+        )
+
+
+@app.get("/admin/chunks")
+def admin_chunks(source_id: str, limit: int = 200):
+    if not source_id:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "source_id is required"}
+        )
+
+    try:
+        with get_sqlite_connection() as conn:
+            file_row = conn.execute(
+                """
+                SELECT source_id, source_type, source_path, file_type, parser_type, chunk_count, status
+                FROM files
+                WHERE source_id = ?
+                """,
+                (source_id,),
+            ).fetchone()
+
+            if not file_row:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": "source not found"}
+                )
+
+            chunk_rows = conn.execute(
+                """
+                SELECT chunk_id, source_id, chunk_index, qdrant_point_id, text_preview, created_at
+                FROM chunks
+                WHERE source_id = ?
+                ORDER BY chunk_index ASC
+                LIMIT ?
+                """,
+                (source_id, limit),
+            ).fetchall()
+
+            file_info = dict(file_row)
+            chunks = [dict(row) for row in chunk_rows]
+
+        return {
+            "source": file_info,
+            "chunks": chunks,
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"admin chunks failed: {str(e)}"}
         )
 
 

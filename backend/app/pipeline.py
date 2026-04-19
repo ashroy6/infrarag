@@ -12,8 +12,7 @@ from app.embedding_service import get_embedding
 from app.incremental_ingest import collect_changed_files
 from app.metadata_db import MetadataDB
 from app.pdf_parser import parse_pdf_file, supports as supports_pdf
-from app.qdrant_client import delete_points_by_source_id, ensure_collection, get_client
-from app.state_store import build_source_id
+from app.qdrant_client import delete_points_by_source_id, ensure_collection, get_client, QDRANT_COLLECTION
 from app.text_chunker import chunk_markdown, chunk_yaml, fixed_chunk_text
 from app.text_parser import parse_text_file, supports as supports_text
 
@@ -91,12 +90,27 @@ def chunk_parsed_content(parsed: dict) -> list[str]:
     return fixed_chunk_text(text)
 
 
+def should_run_delete_sync(source_type: str) -> bool:
+    return source_type in {"local", "git"}
+
+
 def ingest_paths(paths: list[str], source_type: str = "local") -> dict:
     metadata_db = MetadataDB()
     all_files = discover_files(paths)
 
-    deleted = sync_deleted_files(source_type=source_type, current_paths=all_files, metadata_db=metadata_db)
-    changed_files = collect_changed_files(source_type=source_type, file_paths=all_files, metadata_db=metadata_db)
+    deleted = []
+    if should_run_delete_sync(source_type):
+        deleted = sync_deleted_files(
+            source_type=source_type,
+            current_paths=all_files,
+            metadata_db=metadata_db,
+        )
+
+    changed_files = collect_changed_files(
+        source_type=source_type,
+        file_paths=all_files,
+        metadata_db=metadata_db,
+    )
 
     if not changed_files:
         return {
@@ -160,7 +174,7 @@ def ingest_paths(paths: list[str], source_type: str = "local") -> dict:
             )
 
         if points:
-            client.upsert(collection_name="infrarag_docs", points=points)
+            client.upsert(collection_name=QDRANT_COLLECTION, points=points)
 
         metadata_db.upsert_file(
             source_id=source_id,

@@ -7,7 +7,7 @@
   <style>
     body {
       font-family: Arial, sans-serif;
-      max-width: 1400px;
+      max-width: 1450px;
       margin: 40px auto;
       padding: 0 20px;
       background: #fafafa;
@@ -19,6 +19,10 @@
     h1 {
       font-size: 2.2rem;
       margin-bottom: 8px;
+    }
+
+    h2 {
+      margin-top: 0;
     }
 
     .subtitle {
@@ -50,8 +54,10 @@
     }
 
     .topbar a:hover,
-    button:hover {
+    button:hover,
+    .tab:hover {
       background: #1f2937;
+      color: white;
     }
 
     .card {
@@ -83,6 +89,28 @@
     .stat-value {
       font-size: 28px;
       font-weight: bold;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+
+    .tab {
+      background: #e5e7eb;
+      color: #111827;
+      border: none;
+      border-radius: 999px;
+      padding: 10px 16px;
+      cursor: pointer;
+      font-size: 15px;
+    }
+
+    .tab.active {
+      background: #111827;
+      color: white;
     }
 
     .filters {
@@ -154,6 +182,14 @@
       background: #991b1b;
     }
 
+    .secondary {
+      background: #374151;
+    }
+
+    .secondary:hover {
+      background: #1f2937;
+    }
+
     #message {
       white-space: pre-wrap;
       font-size: 15px;
@@ -163,11 +199,75 @@
     .table-wrap {
       overflow-x: auto;
     }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 9999;
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .modal {
+      background: white;
+      width: min(1100px, 95vw);
+      max-height: 85vh;
+      overflow: auto;
+      border-radius: 14px;
+      padding: 20px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    }
+
+    .modal-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+
+    .chunk-card {
+      background: #f8fafc;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+
+    .chunk-header {
+      font-weight: bold;
+      margin-bottom: 8px;
+      font-size: 15px;
+    }
+
+    .chunk-preview {
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      font-family: Consolas, Monaco, monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .muted {
+      color: #666;
+      font-size: 14px;
+    }
   </style>
 </head>
 <body>
   <h1>InfraRAG Admin</h1>
-  <div class="subtitle">View ingested sources, stats, re-ingest sources, and delete indexed items.</div>
+  <div class="subtitle">View ingested sources, stats, re-ingest sources, delete indexed items, and preview chunks.</div>
 
   <div class="topbar">
     <a href="/">Back to Main UI</a>
@@ -179,6 +279,17 @@
     <div class="stats" id="stats">
       <div class="stat"><div class="stat-label">Loading</div><div class="stat-value">...</div></div>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>Source Tabs</h2>
+    <div class="tabs">
+      <button class="tab active" onclick="setTab('')" id="tab-all">All</button>
+      <button class="tab" onclick="setTab('upload')" id="tab-upload">Uploads</button>
+      <button class="tab" onclick="setTab('local')" id="tab-local">Local Docs</button>
+      <button class="tab" onclick="setTab('git')" id="tab-git">Git Repos</button>
+    </div>
+    <div class="muted">Tabs filter the table by source type using the backend source_type filter you already have.</div>
   </div>
 
   <div class="card">
@@ -230,9 +341,41 @@
     </div>
   </div>
 
+  <div class="modal-backdrop" id="chunksModalBackdrop">
+    <div class="modal">
+      <div class="modal-top">
+        <div>
+          <h2 style="margin: 0;">Chunk Preview</h2>
+          <div class="muted" id="chunksModalSubtitle">Loading...</div>
+        </div>
+        <button onclick="closeChunksModal()">Close</button>
+      </div>
+      <div id="chunksModalBody">Loading chunks...</div>
+    </div>
+  </div>
+
   <script>
+    let currentTab = "";
+
     function setMessage(text) {
       document.getElementById("message").textContent = text;
+    }
+
+    function setTab(sourceType) {
+      currentTab = sourceType;
+      document.getElementById("sourceType").value = sourceType;
+
+      const tabs = ["all", "upload", "local", "git"];
+      for (const tab of tabs) {
+        const el = document.getElementById(`tab-${tab}`);
+        if (el) el.classList.remove("active");
+      }
+
+      const activeId = sourceType ? `tab-${sourceType}` : "tab-all";
+      const activeEl = document.getElementById(activeId);
+      if (activeEl) activeEl.classList.add("active");
+
+      loadSources();
     }
 
     async function loadStats() {
@@ -305,6 +448,7 @@
             <td class="mono">${escapeHtml(item.source_id || "")}</td>
             <td>
               <div class="actions">
+                <button class="small-btn secondary" onclick='viewChunks(${JSON.stringify(item.source_id)})'>View Chunks</button>
                 <button class="small-btn" onclick='reingestSource(${JSON.stringify(item.source_path)}, ${JSON.stringify(item.source_type)})'>Re-ingest</button>
                 <button class="small-btn danger" onclick='deleteSource(${JSON.stringify(item.source_id)}, ${JSON.stringify(item.source_path)})'>Delete</button>
               </div>
@@ -365,6 +509,53 @@
       }
     }
 
+    async function viewChunks(sourceId) {
+      const backdrop = document.getElementById("chunksModalBackdrop");
+      const subtitle = document.getElementById("chunksModalSubtitle");
+      const body = document.getElementById("chunksModalBody");
+
+      backdrop.classList.add("open");
+      subtitle.textContent = "Loading...";
+      body.innerHTML = "Loading chunks...";
+
+      try {
+        const res = await fetch(`/api/admin/chunks?source_id=${encodeURIComponent(sourceId)}`);
+        const data = await res.json();
+
+        if (!res.ok) {
+          subtitle.textContent = "Error";
+          body.innerHTML = `<pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre>`;
+          return;
+        }
+
+        const source = data.source || {};
+        const chunks = data.chunks || [];
+
+        subtitle.textContent = `${source.source_path || ""} | ${chunks.length} chunk preview entries`;
+
+        if (chunks.length === 0) {
+          body.innerHTML = "<div>No chunks found.</div>";
+          return;
+        }
+
+        body.innerHTML = chunks.map(chunk => `
+          <div class="chunk-card">
+            <div class="chunk-header">Chunk ${escapeHtml(String(chunk.chunk_index))}</div>
+            <div class="muted">Chunk ID: ${escapeHtml(chunk.chunk_id || "")}</div>
+            <div class="muted" style="margin-bottom: 8px;">Qdrant Point ID: ${escapeHtml(chunk.qdrant_point_id || "")}</div>
+            <div class="chunk-preview">${escapeHtml(chunk.text_preview || "")}</div>
+          </div>
+        `).join("");
+      } catch (err) {
+        subtitle.textContent = "Request failed";
+        body.innerHTML = `<pre>${escapeHtml(err.message)}</pre>`;
+      }
+    }
+
+    function closeChunksModal() {
+      document.getElementById("chunksModalBackdrop").classList.remove("open");
+    }
+
     function escapeHtml(value) {
       return String(value)
         .replaceAll("&", "&amp;")
@@ -379,6 +570,12 @@
       await loadSources();
       setMessage("Admin data refreshed.");
     }
+
+    document.getElementById("chunksModalBackdrop").addEventListener("click", function (event) {
+      if (event.target === this) {
+        closeChunksModal();
+      }
+    });
 
     loadAll();
   </script>
