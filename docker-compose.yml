@@ -27,6 +27,7 @@ services:
     volumes:
       - ./backend:/app
       - ./docs:/docs
+      - backend_data:/app/data
     environment:
       OLLAMA_BASE_URL: http://ollama:11434
       QDRANT_HOST: qdrant
@@ -34,10 +35,14 @@ services:
       QDRANT_COLLECTION: infrarag_docs
       EMBED_MODEL: nomic-embed-text
       CHAT_MODEL: llama3.2:3b
+      METADATA_DB_PATH: /app/data/infrarag.db
+      UPLOAD_DIR: /app/data/uploads
+      REPOS_DIR: /app/data/repos
     depends_on:
       - ollama
       - qdrant
     restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   frontend:
     image: nginx:alpine
@@ -82,3 +87,4 @@ volumes:
   ollama_data:
   qdrant_data:
   grafana_data:
+  backend_data:

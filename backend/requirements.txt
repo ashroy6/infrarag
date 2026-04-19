@@ -1,7 +1,7 @@
 fastapi
-uvicorn[standard]
-qdrant-client
+uvicorn
 requests
-pydantic
+qdrant-client
 prometheus-client
+pypdf
 python-multipart

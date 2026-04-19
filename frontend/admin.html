@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InfraRAG Admin</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 1400px;
+      margin: 40px auto;
+      padding: 0 20px;
+      background: #fafafa;
+      color: #222;
+      font-size: 18px;
+      line-height: 1.5;
+    }
+
+    h1 {
+      font-size: 2.2rem;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      color: #555;
+      margin-bottom: 24px;
+    }
+
+    .topbar {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+
+    .topbar a,
+    .topbar button,
+    select,
+    input {
+      font-size: 16px;
+    }
+
+    .topbar a {
+      text-decoration: none;
+      background: #111827;
+      color: white;
+      padding: 10px 14px;
+      border-radius: 8px;
+      display: inline-block;
+    }
+
+    .topbar a:hover,
+    button:hover {
+      background: #1f2937;
+    }
+
+    .card {
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 12px;
+      padding: 18px;
+      margin-bottom: 20px;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 14px;
+    }
+
+    .stat {
+      background: #f4f4f4;
+      border-radius: 10px;
+      padding: 16px;
+    }
+
+    .stat-label {
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 6px;
+    }
+
+    .stat-value {
+      font-size: 28px;
+      font-weight: bold;
+    }
+
+    .filters {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    select,
+    input {
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      min-width: 180px;
+    }
+
+    button {
+      padding: 10px 14px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      background: #111827;
+      color: white;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 15px;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid #e5e5e5;
+      padding: 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f7f7f7;
+      position: sticky;
+      top: 0;
+    }
+
+    .mono {
+      font-family: Consolas, Monaco, monospace;
+      font-size: 13px;
+      word-break: break-all;
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .small-btn {
+      font-size: 13px;
+      padding: 8px 10px;
+    }
+
+    .danger {
+      background: #b91c1c;
+    }
+
+    .danger:hover {
+      background: #991b1b;
+    }
+
+    #message {
+      white-space: pre-wrap;
+      font-size: 15px;
+      color: #333;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>InfraRAG Admin</h1>
+  <div class="subtitle">View ingested sources, stats, re-ingest sources, and delete indexed items.</div>
+
+  <div class="topbar">
+    <a href="/">Back to Main UI</a>
+    <button onclick="loadAll()">Refresh</button>
+  </div>
+
+  <div class="card">
+    <h2>Stats</h2>
+    <div class="stats" id="stats">
+      <div class="stat"><div class="stat-label">Loading</div><div class="stat-value">...</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Filters</h2>
+    <div class="filters">
+      <select id="sourceType">
+        <option value="">All source types</option>
+        <option value="upload">Upload</option>
+        <option value="local">Local</option>
+        <option value="git">Git</option>
+      </select>
+
+      <select id="status">
+        <option value="">All statuses</option>
+        <option value="active">Active</option>
+        <option value="deleted">Deleted</option>
+      </select>
+
+      <input id="limit" type="number" value="200" min="1" max="1000" />
+      <button onclick="loadSources()">Apply</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Admin Output</h2>
+    <div id="message">Ready.</div>
+  </div>
+
+  <div class="card">
+    <h2>Sources</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Source Type</th>
+            <th>Status</th>
+            <th>File Type</th>
+            <th>Chunks</th>
+            <th>Source Path</th>
+            <th>Last Ingested</th>
+            <th>Source ID</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="sourcesTableBody">
+          <tr><td colspan="8">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    function setMessage(text) {
+      document.getElementById("message").textContent = text;
+    }
+
+    async function loadStats() {
+      const statsEl = document.getElementById("stats");
+      statsEl.innerHTML = '<div class="stat"><div class="stat-label">Loading</div><div class="stat-value">...</div></div>';
+
+      try {
+        const res = await fetch('/api/admin/stats');
+        const data = await res.json();
+
+        if (!res.ok) {
+          statsEl.innerHTML = '<div class="stat"><div class="stat-label">Error</div><div class="stat-value">!</div></div>';
+          setMessage(JSON.stringify(data, null, 2));
+          return;
+        }
+
+        statsEl.innerHTML = `
+          <div class="stat"><div class="stat-label">Total Files</div><div class="stat-value">${data.total_files}</div></div>
+          <div class="stat"><div class="stat-label">Active Files</div><div class="stat-value">${data.active_files}</div></div>
+          <div class="stat"><div class="stat-label">Deleted Files</div><div class="stat-value">${data.deleted_files}</div></div>
+          <div class="stat"><div class="stat-label">Total Chunks</div><div class="stat-value">${data.total_chunks}</div></div>
+          <div class="stat"><div class="stat-label">Uploads</div><div class="stat-value">${data.uploads}</div></div>
+          <div class="stat"><div class="stat-label">Local Files</div><div class="stat-value">${data.local_files}</div></div>
+          <div class="stat"><div class="stat-label">Git Files</div><div class="stat-value">${data.git_files}</div></div>
+        `;
+      } catch (err) {
+        statsEl.innerHTML = '<div class="stat"><div class="stat-label">Error</div><div class="stat-value">!</div></div>';
+        setMessage("Failed to load stats: " + err.message);
+      }
+    }
+
+    async function loadSources() {
+      const sourceType = document.getElementById("sourceType").value;
+      const status = document.getElementById("status").value;
+      const limit = document.getElementById("limit").value || 200;
+      const tbody = document.getElementById("sourcesTableBody");
+
+      tbody.innerHTML = '<tr><td colspan="8">Loading...</td></tr>';
+
+      const params = new URLSearchParams();
+      if (sourceType) params.append("source_type", sourceType);
+      if (status) params.append("status", status);
+      params.append("limit", limit);
+
+      try {
+        const res = await fetch(`/api/admin/sources?${params.toString()}`);
+        const data = await res.json();
+
+        if (!res.ok) {
+          tbody.innerHTML = '<tr><td colspan="8">Error loading sources</td></tr>';
+          setMessage(JSON.stringify(data, null, 2));
+          return;
+        }
+
+        const sources = data.sources || [];
+
+        if (sources.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="8">No sources found.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = sources.map(item => `
+          <tr>
+            <td>${escapeHtml(item.source_type || "")}</td>
+            <td>${escapeHtml(item.status || "")}</td>
+            <td>${escapeHtml(item.file_type || "")}</td>
+            <td>${escapeHtml(String(item.chunk_count || 0))}</td>
+            <td class="mono">${escapeHtml(item.source_path || "")}</td>
+            <td>${escapeHtml(item.last_ingested_at || "")}</td>
+            <td class="mono">${escapeHtml(item.source_id || "")}</td>
+            <td>
+              <div class="actions">
+                <button class="small-btn" onclick='reingestSource(${JSON.stringify(item.source_path)}, ${JSON.stringify(item.source_type)})'>Re-ingest</button>
+                <button class="small-btn danger" onclick='deleteSource(${JSON.stringify(item.source_id)}, ${JSON.stringify(item.source_path)})'>Delete</button>
+              </div>
+            </td>
+          </tr>
+        `).join("");
+      } catch (err) {
+        tbody.innerHTML = '<tr><td colspan="8">Request failed</td></tr>';
+        setMessage("Failed to load sources: " + err.message);
+      }
+    }
+
+    async function reingestSource(sourcePath, sourceType) {
+      setMessage(`Re-ingesting: ${sourcePath}`);
+
+      try {
+        const res = await fetch('/api/admin/reingest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            source_path: sourcePath,
+            source_type: sourceType
+          })
+        });
+
+        const data = await res.json();
+        setMessage(JSON.stringify(data, null, 2));
+
+        if (res.ok) {
+          await loadStats();
+          await loadSources();
+        }
+      } catch (err) {
+        setMessage("Re-ingest failed: " + err.message);
+      }
+    }
+
+    async function deleteSource(sourceId, sourcePath) {
+      const ok = confirm(`Delete this indexed source?\n\n${sourcePath}`);
+      if (!ok) return;
+
+      setMessage(`Deleting: ${sourcePath}`);
+
+      try {
+        const res = await fetch(`/api/admin/source?source_id=${encodeURIComponent(sourceId)}`, {
+          method: 'DELETE'
+        });
+
+        const data = await res.json();
+        setMessage(JSON.stringify(data, null, 2));
+
+        if (res.ok) {
+          await loadStats();
+          await loadSources();
+        }
+      } catch (err) {
+        setMessage("Delete failed: " + err.message);
+      }
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    async function loadAll() {
+      await loadStats();
+      await loadSources();
+      setMessage("Admin data refreshed.");
+    }
+
+    loadAll();
+  </script>
+</body>
+</html>
