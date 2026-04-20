@@ -15,8 +15,11 @@ class MetadataDB:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 30000")
         return conn
 
     def _init_db(self) -> None:
@@ -46,7 +49,7 @@ class MetadataDB:
                     qdrant_point_id TEXT NOT NULL,
                     text_preview TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(source_id) REFERENCES files(source_id)
+                    FOREIGN KEY(source_id) REFERENCES files(source_id) ON DELETE CASCADE
                 )
                 """
             )
@@ -54,6 +57,24 @@ class MetadataDB:
                 """
                 CREATE INDEX IF NOT EXISTS idx_chunks_source_id
                 ON chunks(source_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_files_status
+                ON files(status)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_files_source_type
+                ON files(source_type)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_files_file_hash
+                ON files(file_hash)
                 """
             )
 
@@ -131,6 +152,24 @@ class MetadataDB:
                 "SELECT * FROM files WHERE source_id = ?",
                 (source_id,),
             ).fetchone()
+            return dict(row) if row else None
+
+    def get_active_file_by_hash(
+        self,
+        file_hash: str,
+        source_type: str | None = None,
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM files WHERE file_hash = ? AND status = 'active'"
+        params: list[Any] = [file_hash]
+
+        if source_type:
+            query += " AND source_type = ?"
+            params.append(source_type)
+
+        query += " ORDER BY last_ingested_at DESC LIMIT 1"
+
+        with self._connect() as conn:
+            row = conn.execute(query, params).fetchone()
             return dict(row) if row else None
 
     def list_active_files(self, source_type: str | None = None) -> list[dict[str, Any]]:

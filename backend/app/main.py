@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import re
 import sqlite3
 from typing import Any
 
@@ -17,13 +19,24 @@ from app.qdrant_client import delete_points_by_source_id
 from app.retrieve import retrieve_context
 from app.uploads import save_upload, save_uploads
 
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger(__name__)
+
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2:3b")
 METADATA_DB_PATH = os.getenv("METADATA_DB_PATH", "/app/data/infrarag.db")
-OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "90"))
+
+# Increased a bit from 90 to reduce false timeout failures, but still bounded.
+OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "150"))
 MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "0.35"))
 
-app = FastAPI(title="InfraRAG Backend", version="2.6.0")
+# Keep ask-time context small so local Ollama does not choke on big prompts.
+ASK_RETRIEVE_LIMIT = int(os.getenv("ASK_RETRIEVE_LIMIT", "3"))
+MAX_CONTEXT_CHARS_PER_CHUNK = int(os.getenv("MAX_CONTEXT_CHARS_PER_CHUNK", "1200"))
+MAX_TOTAL_CONTEXT_CHARS = int(os.getenv("MAX_TOTAL_CONTEXT_CHARS", "3200"))
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "140"))
+
+app = FastAPI(title="InfraRAG Backend", version="2.7.1")
 
 REQUEST_COUNT = Counter("infrarag_requests_total", "Total API requests", ["method", "endpoint", "status"])
 REQUEST_LATENCY = Histogram("infrarag_request_latency_seconds", "Request latency", ["endpoint"])
@@ -81,6 +94,7 @@ async def validation_error_handler(_: Request, exc: RequestValidationError):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(_: Request, exc: Exception):
+    logger.exception("Unhandled exception")
     return JSONResponse(
         status_code=500,
         content={
@@ -92,13 +106,66 @@ async def unhandled_exception_handler(_: Request, exc: Exception):
     )
 
 
+def _normalize_question(question: str) -> str:
+    q = (question or "").strip()
+
+    typo_map = {
+        r"\bsmadhi\b": "samadhi",
+        r"\bsamadhi\b": "samadhi",
+        r"\bsummarise\b": "summarize",
+        r"\bpatanjalii\b": "patanjali",
+    }
+
+    for pattern, replacement in typo_map.items():
+        q = re.sub(pattern, replacement, q, flags=re.IGNORECASE)
+
+    return q
+
+
+def _trim_text(text: str, max_chars: int) -> str:
+    value = (text or "").strip()
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars].rstrip() + " ..."
+
+
+def _compact_context_chunks(context_chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    total_chars = 0
+
+    for chunk in context_chunks:
+        trimmed_text = _trim_text(chunk.get("text", ""), MAX_CONTEXT_CHARS_PER_CHUNK)
+        if not trimmed_text:
+            continue
+
+        item = dict(chunk)
+        item["text"] = trimmed_text
+
+        projected_size = total_chars + len(trimmed_text)
+        if compacted and projected_size > MAX_TOTAL_CONTEXT_CHARS:
+            break
+
+        compacted.append(item)
+        total_chars += len(trimmed_text)
+
+    return compacted
+
+
 def build_context_text(context_chunks: list[dict[str, Any]]) -> str:
-    return "\n\n".join(
-        [
-            f"[Source: {c['source']} | Chunk: {c['chunk_index']} | Score: {c.get('score', 0):.4f}]\n{c['text']}"
-            for c in context_chunks
-        ]
-    )
+    parts: list[str] = []
+
+    for chunk in context_chunks:
+        page_info = ""
+        if chunk.get("page_number") is not None:
+            page_info = f" | Page: {chunk['page_number']}"
+        elif chunk.get("page_start") is not None and chunk.get("page_end") is not None:
+            page_info = f" | Pages: {chunk['page_start']}-{chunk['page_end']}"
+
+        parts.append(
+            f"[Source: {chunk['source']} | Chunk: {chunk['chunk_index']}{page_info} | Score: {chunk.get('score', 0):.4f}]\n{chunk['text']}"
+        )
+
+    return "\n\n".join(parts)
 
 
 def build_prompt(question: str, context_text: str) -> str:
@@ -110,38 +177,23 @@ Do not invent facts.
 If the context does not support the answer, reply exactly:
 No evidence found in the knowledge base.
 
-Instructions:
-- Write one clear technical paragraph in about 5 to 7 lines when enough evidence exists.
-- Be specific and direct, not vague.
-- Do not say "it appears", "it seems", or "probably" if the evidence is clear.
-- If the question is about code, explain what the code does, where it does it, and what the outcome is.
-- If the question is about a repo or project, explain:
-  1. the main purpose,
-  2. the key workflow or execution flow,
-  3. the main tools or frameworks only if they are explicitly supported by the context.
-- Prefer concrete workflow steps such as train, validate, predict, test, analyze when present in the context.
-- Do not mention anything that is not supported by the retrieved context.
-
-Format:
-Answer:
-<grounded technical answer>
-
-Evidence:
-- [Source: ... | Chunk: ...]
-- [Source: ... | Chunk: ...]
+Rules:
+- Keep the answer short and direct.
+- Prefer 4 to 7 sentences.
+- Only use facts supported by the retrieved context.
+- If the question is about a PDF, book, or page range, stay within the retrieved document context only.
+- If the question asks for a summary, summarize only what is clearly present in the context.
+- Do not add background knowledge outside the context.
+- Do not repeat the full evidence block in the answer.
 
 Question:
 {question}
 
 Retrieved Context:
 {context_text}
+
+Return only the answer text.
 """.strip()
-
-
-def get_sqlite_connection():
-    conn = sqlite3.connect(METADATA_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 def ask_ollama(question: str, context_chunks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -158,7 +210,14 @@ def ask_ollama(question: str, context_chunks: list[dict[str, Any]]) -> dict[str,
             "citations": [],
         }
 
-    context_text = build_context_text(context_chunks)
+    compact_chunks = _compact_context_chunks(context_chunks)
+    if not compact_chunks:
+        return {
+            "answer": "No evidence found in the knowledge base.",
+            "citations": [],
+        }
+
+    context_text = build_context_text(compact_chunks)
     prompt = build_prompt(question, context_text)
 
     try:
@@ -170,8 +229,8 @@ def ask_ollama(question: str, context_chunks: list[dict[str, Any]]) -> dict[str,
                 "stream": False,
                 "options": {
                     "temperature": 0,
-                    "num_predict": 220,
-                },
+                    "num_predict": OLLAMA_NUM_PREDICT,
+                }
             },
             timeout=OLLAMA_TIMEOUT_SECONDS,
         )
@@ -201,14 +260,20 @@ def ask_ollama(question: str, context_chunks: list[dict[str, Any]]) -> dict[str,
     except ValueError as exc:
         raise InfraRAGError("Failed to parse Ollama JSON response", status_code=502, code="ollama_invalid_json") from exc
 
-    citations = [
-        {
-            "source": c["source"],
-            "chunk_index": c["chunk_index"],
-            "score": c["score"],
+    citations = []
+    for chunk in compact_chunks:
+        item = {
+            "source": chunk["source"],
+            "chunk_index": chunk["chunk_index"],
+            "score": chunk["score"],
         }
-        for c in context_chunks
-    ]
+        if chunk.get("page_number") is not None:
+            item["page_number"] = chunk["page_number"]
+        if chunk.get("page_start") is not None:
+            item["page_start"] = chunk["page_start"]
+        if chunk.get("page_end") is not None:
+            item["page_end"] = chunk["page_end"]
+        citations.append(item)
 
     answer = (data.get("response") or "").strip()
     if not answer:
@@ -218,6 +283,12 @@ def ask_ollama(question: str, context_chunks: list[dict[str, Any]]) -> dict[str,
         "answer": answer,
         "citations": citations,
     }
+
+
+def get_sqlite_connection():
+    conn = sqlite3.connect(METADATA_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 @app.get("/")
@@ -231,24 +302,62 @@ def health():
 
 
 @app.get("/retrieve")
-def retrieve(q: str = ""):
+def retrieve(
+    q: str = "",
+    source_id: str | None = None,
+    source: str | None = None,
+    source_type: str | None = None,
+    file_type: str | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
+):
     if not q:
         raise InfraRAGError("query parameter 'q' is required", status_code=400, code="missing_query")
 
-    hits = retrieve_context(q, limit=5)
-    return {"question": q, "results": hits}
+    normalized_q = _normalize_question(q)
+
+    hits = retrieve_context(
+        normalized_q,
+        limit=ASK_RETRIEVE_LIMIT,
+        source_id=source_id,
+        source=source,
+        source_type=source_type,
+        file_type=file_type,
+        page_start=page_start,
+        page_end=page_end,
+    )
+    return {"question": normalized_q, "results": hits}
 
 
 @app.get("/ask")
-def ask(q: str = ""):
+def ask(
+    q: str = "",
+    source_id: str | None = None,
+    source: str | None = None,
+    source_type: str | None = None,
+    file_type: str | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
+):
     if not q:
         raise InfraRAGError("query parameter 'q' is required", status_code=400, code="missing_query")
 
-    context_chunks = retrieve_context(q, limit=5)
-    result = ask_ollama(q, context_chunks)
+    normalized_q = _normalize_question(q)
+
+    context_chunks = retrieve_context(
+        normalized_q,
+        limit=ASK_RETRIEVE_LIMIT,
+        source_id=source_id,
+        source=source,
+        source_type=source_type,
+        file_type=file_type,
+        page_start=page_start,
+        page_end=page_end,
+    )
+    result = ask_ollama(normalized_q, context_chunks)
 
     return {
-        "question": q,
+        "question": normalized_q,
         "answer": result["answer"],
         "citations": result["citations"],
     }

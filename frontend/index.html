@@ -25,7 +25,17 @@
     .topbar a:hover { background: #1f2937; }
     .card { background: #fff; border: 1px solid #ddd; border-radius: 12px; padding: 20px; margin-bottom: 24px; }
     .row { display: flex; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
-    input[type="text"] { flex: 1; min-width: 300px; padding: 12px; font-size: 19px; }
+    input[type="text"],
+    input[type="number"],
+    select {
+      flex: 1;
+      min-width: 220px;
+      padding: 12px;
+      font-size: 17px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #fff;
+    }
     input[type="file"] {
       flex: 1; min-width: 300px; padding: 10px; font-size: 17px;
       background: #fff; border: 1px solid #ccc; border-radius: 6px;
@@ -47,6 +57,7 @@
     }
     .output-section-title { font-size: 16px; font-weight: bold; margin-bottom: 8px; }
     .output-citations { color: inherit; }
+    .subtle { color: #666; font-size: 15px; }
   </style>
 </head>
 <body>
@@ -59,10 +70,22 @@
 
   <div class="card">
     <label class="label" for="question">Ask a question</label>
+
     <div class="row">
-      <input id="question" type="text" placeholder="Ask a DevOps / Terraform / AWS question" />
+      <input id="question" type="text" placeholder="Ask a DevOps / Terraform / AWS / document question" />
       <button onclick="askQuestion()">Ask</button>
     </div>
+
+    <div class="row">
+      <select id="sourceSelect">
+        <option value="">All sources</option>
+      </select>
+
+      <input id="pageStart" type="number" min="1" placeholder="Page start (optional)" />
+      <input id="pageEnd" type="number" min="1" placeholder="Page end (optional)" />
+    </div>
+
+    <div class="subtle">For PDFs, choose a source and optionally a page range for more accurate retrieval.</div>
   </div>
 
   <div class="card">
@@ -153,9 +176,40 @@ ${citationsHtml}
 `;
     }
 
+    async function loadSources() {
+      const select = document.getElementById("sourceSelect");
+      const currentValue = select.value;
+
+      try {
+        const res = await fetch("/api/admin/sources?status=active&limit=500");
+        const data = await parseApiResponse(res);
+        const sources = Array.isArray(data.sources) ? data.sources : [];
+
+        const options = ['<option value="">All sources</option>'];
+
+        for (const item of sources) {
+          const label = `${item.file_type || ""} | ${item.source_type || ""} | ${item.source_path || item.source_id}`;
+          options.push(
+            `<option value="${escapeHtml(item.source_id)}">${escapeHtml(label)}</option>`
+          );
+        }
+
+        select.innerHTML = options.join("");
+
+        if (currentValue) {
+          select.value = currentValue;
+        }
+      } catch (err) {
+        console.error("Failed to load sources:", err);
+      }
+    }
+
     async function askQuestion() {
       const q = document.getElementById("question").value.trim();
       const output = document.getElementById("output");
+      const sourceId = document.getElementById("sourceSelect").value.trim();
+      const pageStart = document.getElementById("pageStart").value.trim();
+      const pageEnd = document.getElementById("pageEnd").value.trim();
 
       if (!q) {
         output.textContent = "Please enter a question.";
@@ -165,7 +219,22 @@ ${citationsHtml}
       output.textContent = "Loading...";
 
       try {
-        const res = await fetch(`/api/ask?q=${encodeURIComponent(q)}`);
+        const params = new URLSearchParams();
+        params.set("q", q);
+
+        if (sourceId) {
+          params.set("source_id", sourceId);
+        }
+
+        if (pageStart) {
+          params.set("page_start", pageStart);
+        }
+
+        if (pageEnd) {
+          params.set("page_end", pageEnd);
+        }
+
+        const res = await fetch(`/api/ask?${params.toString()}`);
         const data = await parseApiResponse(res);
         renderAskOutput(data);
       } catch (err) {
@@ -199,6 +268,7 @@ ${citationsHtml}
 
         uploadStatus.textContent = `Upload complete: ${file.name}`;
         output.textContent = JSON.stringify(data, null, 2);
+        await loadSources();
       } catch (err) {
         uploadStatus.textContent = "Upload failed.";
         output.textContent = "Upload request failed: " + err.message;
@@ -239,11 +309,14 @@ ${citationsHtml}
 
         folderStatus.textContent = `Folder upload complete: ${folderName} (${files.length} files)`;
         output.textContent = JSON.stringify(data, null, 2);
+        await loadSources();
       } catch (err) {
         folderStatus.textContent = "Folder upload failed.";
         output.textContent = "Folder upload request failed: " + err.message;
       }
     }
+
+    loadSources();
   </script>
 </body>
 </html>
