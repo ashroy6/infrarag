@@ -361,6 +361,51 @@
       document.getElementById("message").textContent = text;
     }
 
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    async function parseApiResponse(res) {
+      const contentType = (res.headers.get("content-type") || "").toLowerCase();
+      const rawText = await res.text();
+
+      let data = null;
+
+      if (contentType.includes("application/json")) {
+        try {
+          data = rawText ? JSON.parse(rawText) : {};
+        } catch {
+          throw new Error(`API returned invalid JSON. HTTP ${res.status}. Body: ${rawText.slice(0, 300)}`);
+        }
+      }
+
+      if (!res.ok) {
+        if (data && data.error) {
+          const message = typeof data.error === "string"
+            ? data.error
+            : data.error.message || JSON.stringify(data.error);
+          throw new Error(`HTTP ${res.status}: ${message}`);
+        }
+
+        if (contentType.includes("text/html")) {
+          throw new Error(`HTTP ${res.status}: proxy/backend returned HTML instead of JSON`);
+        }
+
+        throw new Error(`HTTP ${res.status}: ${rawText.slice(0, 300) || "Unknown error"}`);
+      }
+
+      if (!contentType.includes("application/json")) {
+        throw new Error(`Expected JSON but got content-type: ${contentType || "unknown"}`);
+      }
+
+      return data;
+    }
+
     function setTab(sourceType) {
       currentTab = sourceType;
       document.getElementById("sourceType").value = sourceType;
@@ -383,14 +428,8 @@
       statsEl.innerHTML = '<div class="stat"><div class="stat-label">Loading</div><div class="stat-value">...</div></div>';
 
       try {
-        const res = await fetch('/api/admin/stats');
-        const data = await res.json();
-
-        if (!res.ok) {
-          statsEl.innerHTML = '<div class="stat"><div class="stat-label">Error</div><div class="stat-value">!</div></div>';
-          setMessage(JSON.stringify(data, null, 2));
-          return;
-        }
+        const res = await fetch("/api/admin/stats");
+        const data = await parseApiResponse(res);
 
         statsEl.innerHTML = `
           <div class="stat"><div class="stat-label">Total Files</div><div class="stat-value">${data.total_files}</div></div>
@@ -422,14 +461,7 @@
 
       try {
         const res = await fetch(`/api/admin/sources?${params.toString()}`);
-        const data = await res.json();
-
-        if (!res.ok) {
-          tbody.innerHTML = '<tr><td colspan="8">Error loading sources</td></tr>';
-          setMessage(JSON.stringify(data, null, 2));
-          return;
-        }
-
+        const data = await parseApiResponse(res);
         const sources = data.sources || [];
 
         if (sources.length === 0) {
@@ -465,22 +497,20 @@
       setMessage(`Re-ingesting: ${sourcePath}`);
 
       try {
-        const res = await fetch('/api/admin/reingest', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+        const res = await fetch("/api/admin/reingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             source_path: sourcePath,
             source_type: sourceType
           })
         });
 
-        const data = await res.json();
+        const data = await parseApiResponse(res);
         setMessage(JSON.stringify(data, null, 2));
 
-        if (res.ok) {
-          await loadStats();
-          await loadSources();
-        }
+        await loadStats();
+        await loadSources();
       } catch (err) {
         setMessage("Re-ingest failed: " + err.message);
       }
@@ -494,16 +524,14 @@
 
       try {
         const res = await fetch(`/api/admin/source?source_id=${encodeURIComponent(sourceId)}`, {
-          method: 'DELETE'
+          method: "DELETE"
         });
 
-        const data = await res.json();
+        const data = await parseApiResponse(res);
         setMessage(JSON.stringify(data, null, 2));
 
-        if (res.ok) {
-          await loadStats();
-          await loadSources();
-        }
+        await loadStats();
+        await loadSources();
       } catch (err) {
         setMessage("Delete failed: " + err.message);
       }
@@ -520,13 +548,7 @@
 
       try {
         const res = await fetch(`/api/admin/chunks?source_id=${encodeURIComponent(sourceId)}`);
-        const data = await res.json();
-
-        if (!res.ok) {
-          subtitle.textContent = "Error";
-          body.innerHTML = `<pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre>`;
-          return;
-        }
+        const data = await parseApiResponse(res);
 
         const source = data.source || {};
         const chunks = data.chunks || [];
@@ -554,15 +576,6 @@
 
     function closeChunksModal() {
       document.getElementById("chunksModalBackdrop").classList.remove("open");
-    }
-
-    function escapeHtml(value) {
-      return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
     }
 
     async function loadAll() {

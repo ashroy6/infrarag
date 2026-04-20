@@ -15,134 +15,38 @@
       font-size: 19px;
       line-height: 1.6;
     }
-
-    h1 {
-      margin-bottom: 10px;
-      font-size: 2.4rem;
-    }
-
-    p.subtitle {
-      margin-top: 0;
-      margin-bottom: 28px;
-      color: #555;
-      font-size: 1.15rem;
-    }
-
-    .topbar {
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-      margin-bottom: 18px;
-    }
-
+    h1 { margin-bottom: 10px; font-size: 2.4rem; }
+    p.subtitle { margin-top: 0; margin-bottom: 28px; color: #555; font-size: 1.15rem; }
+    .topbar { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
     .topbar a {
-      text-decoration: none;
-      background: #111827;
-      color: white;
-      padding: 10px 14px;
-      border-radius: 8px;
-      display: inline-block;
-      font-size: 16px;
+      text-decoration: none; background: #111827; color: white; padding: 10px 14px;
+      border-radius: 8px; display: inline-block; font-size: 16px;
     }
-
-    .topbar a:hover {
-      background: #1f2937;
-    }
-
-    .card {
-      background: #fff;
-      border: 1px solid #ddd;
-      border-radius: 12px;
-      padding: 20px;
-      margin-bottom: 24px;
-    }
-
-    .row {
-      display: flex;
-      gap: 12px;
-      margin-bottom: 14px;
-      flex-wrap: wrap;
-    }
-
-    input[type="text"] {
-      flex: 1;
-      min-width: 300px;
-      padding: 12px;
-      font-size: 19px;
-    }
-
+    .topbar a:hover { background: #1f2937; }
+    .card { background: #fff; border: 1px solid #ddd; border-radius: 12px; padding: 20px; margin-bottom: 24px; }
+    .row { display: flex; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+    input[type="text"] { flex: 1; min-width: 300px; padding: 12px; font-size: 19px; }
     input[type="file"] {
-      flex: 1;
-      min-width: 300px;
-      padding: 10px;
-      font-size: 17px;
-      background: #fff;
-      border: 1px solid #ccc;
-      border-radius: 6px;
+      flex: 1; min-width: 300px; padding: 10px; font-size: 17px;
+      background: #fff; border: 1px solid #ccc; border-radius: 6px;
     }
-
     button {
-      padding: 12px 18px;
-      cursor: pointer;
-      border: none;
-      border-radius: 6px;
-      background: #111827;
-      color: white;
-      font-size: 17px;
+      padding: 12px 18px; cursor: pointer; border: none; border-radius: 6px;
+      background: #111827; color: white; font-size: 17px;
     }
-
-    button:hover {
-      background: #1f2937;
-    }
-
+    button:hover { background: #1f2937; }
     pre {
-      background: #f4f4f4;
-      padding: 18px;
-      border-radius: 8px;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      overflow-x: auto;
-      min-height: 140px;
-      font-size: 17px;
-      line-height: 1.55;
+      background: #f4f4f4; padding: 18px; border-radius: 8px; white-space: pre-wrap;
+      word-wrap: break-word; overflow-x: auto; min-height: 140px; font-size: 17px; line-height: 1.55;
     }
-
-    .status {
-      font-size: 16px;
-      color: #444;
-      margin-top: 10px;
-    }
-
-    .label {
-      font-size: 16px;
-      font-weight: bold;
-      margin-bottom: 10px;
-      display: block;
-    }
-
-    .hint {
-      font-size: 15px;
-      color: #666;
-      margin-top: 6px;
-    }
-
+    .status { font-size: 16px; color: #444; margin-top: 10px; }
+    .label { font-size: 16px; font-weight: bold; margin-bottom: 10px; display: block; }
+    .hint { font-size: 15px; color: #666; margin-top: 6px; }
     .output-answer {
-      color: #8b0000;
-      font-weight: 600;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      margin-bottom: 18px;
+      color: #8b0000; font-weight: 600; white-space: pre-wrap; word-wrap: break-word; margin-bottom: 18px;
     }
-
-    .output-section-title {
-      font-size: 16px;
-      font-weight: bold;
-      margin-bottom: 8px;
-    }
-
-    .output-citations {
-      color: inherit;
-    }
+    .output-section-title { font-size: 16px; font-weight: bold; margin-bottom: 8px; }
+    .output-citations { color: inherit; }
   </style>
 </head>
 <body>
@@ -195,17 +99,49 @@
         .replaceAll("'", "&#039;");
     }
 
+    async function parseApiResponse(res) {
+      const contentType = (res.headers.get("content-type") || "").toLowerCase();
+      const rawText = await res.text();
+
+      let data = null;
+      if (contentType.includes("application/json")) {
+        try {
+          data = rawText ? JSON.parse(rawText) : {};
+        } catch {
+          throw new Error(`API returned invalid JSON. HTTP ${res.status}. Body: ${rawText.slice(0, 300)}`);
+        }
+      }
+
+      if (!res.ok) {
+        if (data && data.error) {
+          const message = typeof data.error === "string"
+            ? data.error
+            : data.error.message || JSON.stringify(data.error);
+          throw new Error(`HTTP ${res.status}: ${message}`);
+        }
+
+        if (contentType.includes("text/html")) {
+          throw new Error(`HTTP ${res.status}: proxy/backend returned HTML instead of JSON`);
+        }
+
+        throw new Error(`HTTP ${res.status}: ${rawText.slice(0, 300) || "Unknown error"}`);
+      }
+
+      if (!contentType.includes("application/json")) {
+        throw new Error(`Expected JSON but got content-type: ${contentType || "unknown"}`);
+      }
+
+      return data;
+    }
+
     function renderAskOutput(data) {
       const output = document.getElementById("output");
       const answer = data.answer || "";
       const citations = Array.isArray(data.citations) ? data.citations : [];
 
       let citationsHtml = "<div class='output-citations'>No citations returned.</div>";
-
       if (citations.length > 0) {
-        citationsHtml = `
-<div class="output-citations">${escapeHtml(JSON.stringify(citations, null, 2))}</div>
-`;
+        citationsHtml = `<div class="output-citations">${escapeHtml(JSON.stringify(citations, null, 2))}</div>`;
       }
 
       output.innerHTML = `
@@ -230,13 +166,7 @@ ${citationsHtml}
 
       try {
         const res = await fetch(`/api/ask?q=${encodeURIComponent(q)}`);
-        const data = await res.json();
-
-        if (!res.ok) {
-          output.textContent = JSON.stringify(data, null, 2);
-          return;
-        }
-
+        const data = await parseApiResponse(res);
         renderAskOutput(data);
       } catch (err) {
         output.textContent = "Request failed: " + err.message;
@@ -265,14 +195,7 @@ ${citationsHtml}
           method: "POST",
           body: formData
         });
-
-        const data = await res.json();
-
-        if (!res.ok) {
-          uploadStatus.textContent = "Upload failed.";
-          output.textContent = JSON.stringify(data, null, 2);
-          return;
-        }
+        const data = await parseApiResponse(res);
 
         uploadStatus.textContent = `Upload complete: ${file.name}`;
         output.textContent = JSON.stringify(data, null, 2);
@@ -312,14 +235,7 @@ ${citationsHtml}
           method: "POST",
           body: formData
         });
-
-        const data = await res.json();
-
-        if (!res.ok) {
-          folderStatus.textContent = "Folder upload failed.";
-          output.textContent = JSON.stringify(data, null, 2);
-          return;
-        }
+        const data = await parseApiResponse(res);
 
         folderStatus.textContent = `Folder upload complete: ${folderName} (${files.length} files)`;
         output.textContent = JSON.stringify(data, null, 2);
