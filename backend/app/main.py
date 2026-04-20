@@ -19,7 +19,7 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2:3b")
 METADATA_DB_PATH = os.getenv("METADATA_DB_PATH", "/app/data/infrarag.db")
 
-app = FastAPI(title="InfraRAG Backend", version="2.3.0")
+app = FastAPI(title="InfraRAG Backend", version="2.5.2")
 
 REQUEST_COUNT = Counter("infrarag_requests_total", "Total API requests", ["method", "endpoint"])
 REQUEST_LATENCY = Histogram("infrarag_request_latency_seconds", "Request latency", ["endpoint"])
@@ -37,6 +37,52 @@ async def metrics_middleware(request, call_next):
     return response
 
 
+def build_context_text(context_chunks: list[dict]) -> str:
+    return "\n\n".join(
+        [
+            f"[Source: {c['source']} | Chunk: {c['chunk_index']} | Score: {c.get('score', 0):.4f}]\n{c['text']}"
+            for c in context_chunks
+        ]
+    )
+
+
+def build_prompt(question: str, context_text: str) -> str:
+    return f"""
+You are InfraRAG, a private DevOps and cloud assistant.
+
+Answer the user's question using only the retrieved context below.
+Do not invent facts.
+If the context does not support the answer, reply exactly:
+No evidence found in the knowledge base.
+
+Instructions:
+- Write one clear technical paragraph in about 5 to 7 lines when enough evidence exists.
+- Be specific and direct, not vague.
+- Do not say "it appears", "it seems", or "probably" if the evidence is clear.
+- If the question is about code, explain what the code does, where it does it, and what the outcome is.
+- If the question is about a repo or project, explain:
+  1. the main purpose,
+  2. the key workflow or execution flow,
+  3. the main tools or frameworks only if they are explicitly supported by the context.
+- Prefer concrete workflow steps such as train, validate, predict, test, analyze when present in the context.
+- Do not mention anything that is not supported by the retrieved context.
+
+Format:
+Answer:
+<grounded technical answer>
+
+Evidence:
+- [Source: ... | Chunk: ...]
+- [Source: ... | Chunk: ...]
+
+Question:
+{question}
+
+Retrieved Context:
+{context_text}
+""".strip()
+
+
 def ask_ollama(question: str, context_chunks: list[dict]):
     if not context_chunks:
         return {
@@ -44,26 +90,17 @@ def ask_ollama(question: str, context_chunks: list[dict]):
             "citations": []
         }
 
-    context_text = "\n\n".join(
-        [
-            f"[Source: {c['source']} | Chunk: {c['chunk_index']}]\n{c['text']}"
-            for c in context_chunks
-        ]
-    )
+    top_score = max(c.get("score", 0) for c in context_chunks)
+    min_score_threshold = 0.35
 
-    prompt = f"""
-You are InfraRAG, a private DevOps and cloud assistant.
+    if top_score < min_score_threshold:
+        return {
+            "answer": "No evidence found in the knowledge base.",
+            "citations": []
+        }
 
-Answer the question using ONLY the context below.
-If the answer is not present in the context, say: "No evidence found in the knowledge base."
-Be concise and factual.
-
-Context:
-{context_text}
-
-Question:
-{question}
-""".strip()
+    context_text = build_context_text(context_chunks)
+    prompt = build_prompt(question, context_text)
 
     try:
         response = requests.post(
@@ -71,9 +108,13 @@ Question:
             json={
                 "model": CHAT_MODEL,
                 "prompt": prompt,
-                "stream": False
+                "stream": False,
+                "options": {
+                    "temperature": 0,
+                    "num_predict": 220
+                }
             },
-            timeout=180
+            timeout=90
         )
         response.raise_for_status()
         data = response.json()
@@ -87,8 +128,12 @@ Question:
             for c in context_chunks
         ]
 
+        answer = data.get("response", "").strip()
+        if not answer:
+            answer = "No evidence found in the knowledge base."
+
         return {
-            "answer": data.get("response", "").strip(),
+            "answer": answer,
             "citations": citations
         }
 
