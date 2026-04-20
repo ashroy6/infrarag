@@ -58,6 +58,25 @@
     .output-section-title { font-size: 16px; font-weight: bold; margin-bottom: 8px; }
     .output-citations { color: inherit; }
     .subtle { color: #666; font-size: 15px; }
+    .inline-check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 15px;
+      color: #444;
+      min-width: 220px;
+    }
+    .inline-check input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      margin: 0;
+    }
+    .source-summary {
+      font-size: 14px;
+      color: #666;
+      margin-top: -4px;
+      margin-bottom: 8px;
+    }
   </style>
 </head>
 <body>
@@ -77,6 +96,20 @@
     </div>
 
     <div class="row">
+      <input id="sourceSearch" type="text" placeholder="Search sources by name/path (optional)" oninput="renderSourceOptions()" />
+      <select id="sourceTypeFilter" onchange="renderSourceOptions()">
+        <option value="">All source types</option>
+        <option value="upload">Uploads</option>
+        <option value="git">Git</option>
+        <option value="local">Local</option>
+      </select>
+      <label class="inline-check">
+        <input id="showAllSources" type="checkbox" onchange="renderSourceOptions()" />
+        Show all sources
+      </label>
+    </div>
+
+    <div class="row">
       <select id="sourceSelect">
         <option value="">All sources</option>
       </select>
@@ -85,7 +118,8 @@
       <input id="pageEnd" type="number" min="1" placeholder="Page end (optional)" />
     </div>
 
-    <div class="subtle">For PDFs, choose a source and optionally a page range for more accurate retrieval.</div>
+    <div id="sourceSummary" class="source-summary">Loading sources...</div>
+    <div class="subtle">By default only the most recent 20 sources are shown. Use search, type filter, or “Show all sources” if needed.</div>
   </div>
 
   <div class="card">
@@ -113,6 +147,9 @@
   </div>
 
   <script>
+    const RECENT_SOURCE_LIMIT = 20;
+    let allSources = [];
+
     function escapeHtml(value) {
       return String(value)
         .replaceAll("&", "&amp;")
@@ -157,6 +194,125 @@
       return data;
     }
 
+    function basename(path) {
+      if (!path) return "";
+      const parts = path.split("/");
+      return parts[parts.length - 1] || path;
+    }
+
+    function formatSourceLabel(item) {
+      const sourcePath = item.source_path || item.source_id || "";
+      const shortName = basename(sourcePath);
+
+      if (item.source_type === "upload") {
+        return `Upload: ${shortName}`;
+      }
+      if (item.source_type === "git") {
+        return `Git: ${shortName}`;
+      }
+      if (item.source_type === "local") {
+        return `Local: ${shortName}`;
+      }
+      return shortName || item.source_id || "Unknown source";
+    }
+
+    function formatSourceMeta(item) {
+      const parts = [];
+
+      if (item.file_type) parts.push(item.file_type);
+      if (item.source_type) parts.push(item.source_type);
+      if (typeof item.chunk_count === "number") parts.push(`${item.chunk_count} chunks`);
+
+      return parts.join(" | ");
+    }
+
+    function sortSourcesNewestFirst(items) {
+      return [...items].sort((a, b) => {
+        const aTime = new Date(a.last_ingested_at || 0).getTime();
+        const bTime = new Date(b.last_ingested_at || 0).getTime();
+        return bTime - aTime;
+      });
+    }
+
+    function filterSources(items) {
+      const search = document.getElementById("sourceSearch").value.trim().toLowerCase();
+      const typeFilter = document.getElementById("sourceTypeFilter").value.trim();
+      const showAll = document.getElementById("showAllSources").checked;
+
+      let filtered = sortSourcesNewestFirst(items);
+
+      if (typeFilter) {
+        filtered = filtered.filter(item => (item.source_type || "") === typeFilter);
+      }
+
+      if (search) {
+        filtered = filtered.filter(item => {
+          const haystack = [
+            item.source_path || "",
+            item.source_id || "",
+            item.file_type || "",
+            item.source_type || "",
+            formatSourceLabel(item)
+          ].join(" ").toLowerCase();
+
+          return haystack.includes(search);
+        });
+      }
+
+      if (!showAll && !search) {
+        filtered = filtered.slice(0, RECENT_SOURCE_LIMIT);
+      }
+
+      return filtered;
+    }
+
+    function renderSourceOptions() {
+      const select = document.getElementById("sourceSelect");
+      const summary = document.getElementById("sourceSummary");
+      const currentValue = select.value;
+
+      const filtered = filterSources(allSources);
+
+      const options = ['<option value="">All sources</option>'];
+
+      for (const item of filtered) {
+        const label = formatSourceLabel(item);
+        const meta = formatSourceMeta(item);
+        const fullLabel = meta ? `${label} (${meta})` : label;
+
+        options.push(
+          `<option value="${escapeHtml(item.source_id)}">${escapeHtml(fullLabel)}</option>`
+        );
+      }
+
+      select.innerHTML = options.join("");
+
+      if (currentValue && filtered.some(item => item.source_id === currentValue)) {
+        select.value = currentValue;
+      }
+
+      const total = allSources.length;
+      const shown = filtered.length;
+      const showAll = document.getElementById("showAllSources").checked;
+      const search = document.getElementById("sourceSearch").value.trim();
+      const typeFilter = document.getElementById("sourceTypeFilter").value.trim();
+
+      let mode = "";
+      if (search) {
+        mode = `Showing ${shown} matching source(s)`;
+      } else if (showAll) {
+        mode = `Showing all ${shown} source(s)`;
+      } else {
+        mode = `Showing ${shown} recent source(s) out of ${total}`;
+      }
+
+      if (typeFilter) {
+        mode += ` | filtered by type: ${typeFilter}`;
+      }
+
+      summary.textContent = total === 0 ? "No sources available yet." : mode;
+    }
+
     function renderAskOutput(data) {
       const output = document.getElementById("output");
       const answer = data.answer || "";
@@ -177,29 +333,18 @@ ${citationsHtml}
     }
 
     async function loadSources() {
-      const select = document.getElementById("sourceSelect");
-      const currentValue = select.value;
+      const summary = document.getElementById("sourceSummary");
+      summary.textContent = "Loading sources...";
 
       try {
-        const res = await fetch("/api/admin/sources?status=active&limit=500");
+        const res = await fetch("/api/admin/sources?status=active&limit=1000");
         const data = await parseApiResponse(res);
-        const sources = Array.isArray(data.sources) ? data.sources : [];
-
-        const options = ['<option value="">All sources</option>'];
-
-        for (const item of sources) {
-          const label = `${item.file_type || ""} | ${item.source_type || ""} | ${item.source_path || item.source_id}`;
-          options.push(
-            `<option value="${escapeHtml(item.source_id)}">${escapeHtml(label)}</option>`
-          );
-        }
-
-        select.innerHTML = options.join("");
-
-        if (currentValue) {
-          select.value = currentValue;
-        }
+        allSources = Array.isArray(data.sources) ? data.sources : [];
+        renderSourceOptions();
       } catch (err) {
+        allSources = [];
+        renderSourceOptions();
+        summary.textContent = "Failed to load sources.";
         console.error("Failed to load sources:", err);
       }
     }
