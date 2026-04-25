@@ -313,8 +313,8 @@
     }
 
     .message {
-      max-width: 900px;
-      margin: 0 auto 18px;
+      max-width: 980px;
+      margin: 0 auto 8px;
       display: grid;
       grid-template-columns: 38px 1fr;
       gap: 10px;
@@ -343,37 +343,34 @@
     }
 
     .bubble {
-      border-radius: 0;
-      padding: 4px 0;
+      border-radius: 14px;
+      padding: 10px 12px;
       line-height: 1.45;
       white-space: normal;
       word-break: break-word;
-      border: none;
-      box-shadow: none;
-      background: transparent;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
     }
 
     .user-message .bubble {
-      background: transparent;
+      background: var(--user-bubble);
       color: #ffffff;
       white-space: pre-wrap;
-      font-size: 16px;
-      font-weight: 500;
     }
 
     .assistant-message .bubble {
-      background: transparent;
+      background: var(--assistant-bubble);
       color: #f3f4f6;
     }
 
     .meta-box {
-      background: transparent;
-      border: none;
-      border-radius: 0;
-      padding: 0;
+      background: #242424;
+      border: 1px solid #3a3a3a;
+      border-radius: 10px;
+      padding: 7px 9px;
       margin: 0 0 8px 0;
-      font-size: 12px;
-      color: #a3a3a3;
+      font-size: 12.5px;
+      color: #cbd5e1;
       white-space: normal;
     }
 
@@ -385,19 +382,9 @@
     }
 
     .meta-grid {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px 14px;
-      align-items: center;
-    }
-
-    .meta-grid div {
-      color: #9ca3af;
-    }
-
-    .meta-grid strong {
-      color: #bdbdbd;
-      font-weight: 600;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+      gap: 4px 10px;
     }
 
     .mini-progress {
@@ -472,12 +459,12 @@
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      font-size: 11px;
-      font-weight: 700;
+      font-size: 12px;
+      font-weight: 800;
       letter-spacing: 0.04em;
       text-transform: uppercase;
-      color: #8ee0c2;
-      margin-bottom: 6px;
+      color: #a7f3d0;
+      margin-bottom: 7px;
     }
 
     .answer-label::before {
@@ -491,15 +478,16 @@
 
     .assistant-answer {
       margin-top: 0;
-      font-size: 16px;
-      line-height: 1.7;
+      font-size: 16.5px;
+      line-height: 1.65;
       color: #ffffff;
       white-space: pre-wrap;
-      background: transparent;
-      border: none;
-      border-radius: 0;
-      padding: 0;
-      box-shadow: none;
+      background: #303030;
+      border: 1px solid #474747;
+      border-left: 4px solid var(--accent);
+      border-radius: 12px;
+      padding: 14px 16px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
     }
 
     .citations {
@@ -512,10 +500,10 @@
     }
 
     .citations details {
-      border: none;
-      border-radius: 0;
-      background: transparent;
-      padding: 0;
+      border: 1px solid #3a3a3a;
+      border-radius: 12px;
+      background: #262626;
+      padding: 8px 10px;
     }
 
     .citations summary {
@@ -551,20 +539,20 @@
     .citation-btn {
       width: 100%;
       text-align: left;
-      background: transparent;
-      color: #aeb4bd;
-      border: none;
-      border-radius: 0;
-      padding: 6px 0;
-      margin-top: 3px;
+      background: #2b2b2b;
+      color: #d1d5db;
+      border: 1px solid #3c3c3c;
+      border-radius: 9px;
+      padding: 7px 9px;
+      margin-top: 5px;
       cursor: pointer;
       font-size: 12px;
       line-height: 1.35;
-      border-bottom: 1px solid #343434;
     }
 
     .citation-btn:hover {
-      background: transparent;
+      background: #333333;
+      border-color: #555555;
       color: #ffffff;
     }
 
