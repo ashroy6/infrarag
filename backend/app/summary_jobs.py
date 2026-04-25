@@ -16,6 +16,7 @@ from app.llm_client import CHAT_MODEL, generate_text
 from app.metadata_db import MetadataDB
 from app.prompts import DOCUMENT_SUMMARY_MAP_PROMPT, DOCUMENT_SUMMARY_REDUCE_PROMPT
 from app.router import PIPELINE_LABELS
+from app.retrieve import retrieve_context
 
 DB_PATH = os.getenv("METADATA_DB_PATH", "/app/data/infrarag.db")
 
@@ -158,6 +159,76 @@ def _filter_by_page_range(
     return filtered
 
 
+
+def _resolve_summary_source_id(
+    question: str,
+    explicit_source_id: str | None,
+    routing: dict[str, Any],
+    page_start: int | None,
+    page_end: int | None,
+) -> str | None:
+    """
+    Resolve the best source for a full document summary.
+
+    Generic behaviour:
+    - If the user selected a source, use it.
+    - Otherwise retrieve matching chunks first.
+    - Group retrieved chunks by source_id.
+    - Pick the source with the strongest cluster score.
+    """
+    if explicit_source_id:
+        return explicit_source_id
+
+    retrieval_plan = routing.get("planner") or routing
+
+    try:
+        candidate_chunks = retrieve_context(
+            question,
+            limit=10,
+            page_start=page_start,
+            page_end=page_end,
+            retrieval_plan=retrieval_plan,
+        )
+    except Exception:
+        return None
+
+    if not candidate_chunks:
+        return None
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+
+    for chunk in candidate_chunks:
+        sid = chunk.get("source_id")
+        if not sid:
+            continue
+        grouped.setdefault(str(sid), []).append(chunk)
+
+    if not grouped:
+        return None
+
+    best_source_id = None
+    best_score = -1.0
+
+    for sid, chunks in grouped.items():
+        scores = sorted(
+            [float(c.get("score", 0.0) or 0.0) for c in chunks],
+            reverse=True,
+        )
+
+        top_scores = scores[:5]
+        avg_top = sum(top_scores) / max(len(top_scores), 1)
+        max_score = max(scores) if scores else 0.0
+        count_bonus = min(len(chunks), 6) * 0.03
+
+        cluster_score = (0.60 * avg_top) + (0.30 * max_score) + count_bonus
+
+        if cluster_score > best_score:
+            best_score = cluster_score
+            best_source_id = sid
+
+    return best_source_id
+
+
 def _run_document_summary_job(
     job_id: str,
     question: str,
@@ -172,7 +243,16 @@ def _run_document_summary_job(
     try:
         _update_job(job_id, status="running")
 
-        resolved_source_id, chunks = load_all_source_chunks(source_id)
+        resolved_input_source_id = _resolve_summary_source_id(
+            question=question,
+            explicit_source_id=source_id,
+            routing=routing,
+            page_start=page_start,
+            page_end=page_end,
+        )
+
+        resolved_source_id, chunks = load_all_source_chunks(resolved_input_source_id)
+
         if not resolved_source_id or not chunks:
             answer = "No evidence found in the knowledge base."
             _update_job(

@@ -36,24 +36,25 @@ services:
       QDRANT_COLLECTION: infrarag_docs
       EMBED_MODEL: nomic-embed-text
       CHAT_MODEL: llama3.2:3b
-
       PLANNER_ENABLED: "true"
       PLANNER_TIMEOUT_SECONDS: 45
       PLANNER_NUM_PREDICT: 220
-
       DOC_SUMMARY_BATCH_SIZE: 4
       DOC_SUMMARY_MAP_NUM_PREDICT: 700
       DOC_SUMMARY_REDUCE_NUM_PREDICT: 1800
-
-      VERIFY_COMPLEX_ANSWERS: "true"
-      VERIFIER_TIMEOUT_SECONDS: 90
-      VERIFIER_NUM_PREDICT: 800
-      VERIFIER_MAX_CONTEXT_CHARS: 9000
-      VERIFIER_MAX_ANSWER_CHARS: 7000
-
       METADATA_DB_PATH: /app/data/infrarag.db
       UPLOAD_DIR: /app/data/uploads
       REPOS_DIR: /app/data/repos
+      HF_HOME: /root/.cache/huggingface
+      TRANSFORMERS_CACHE: /root/.cache/huggingface
+      NORMAL_QA_LIMIT: 6
+      LONG_EXPLANATION_LIMIT: 10
+      REPO_EXPLANATION_LIMIT: 10
+      INCIDENT_RUNBOOK_LIMIT: 8
+      RERANKER_ENABLED: "true"
+      RERANKER_MODEL: BAAI/bge-reranker-base
+      RERANKER_BATCH_SIZE: 8
+      RERANKER_MAX_TEXT_CHARS: 1800
     depends_on:
       - ollama
       - qdrant

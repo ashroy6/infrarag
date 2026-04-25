@@ -5,13 +5,13 @@ from typing import Any
 
 from app.context_utils import build_citations, build_context_text, compact_chunks
 from app.llm_client import generate_text
-from app.prompts import REPO_EXPLANATION_PROMPT
+from app.prompts import NORMAL_QA_PROMPT
 from app.response_formatter import no_evidence_response
 from app.retrieve import retrieve_context
 
 MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "0.35"))
-REPO_EXPLANATION_LIMIT = int(os.getenv("REPO_EXPLANATION_LIMIT", "10"))
-REPO_EXPLANATION_NUM_PREDICT = int(os.getenv("REPO_EXPLANATION_NUM_PREDICT", "1400"))
+NORMAL_QA_LIMIT = int(os.getenv("NORMAL_QA_LIMIT", "6"))
+NORMAL_QA_NUM_PREDICT = int(os.getenv("NORMAL_QA_NUM_PREDICT", "500"))
 
 
 def run(
@@ -26,7 +26,7 @@ def run(
 ) -> dict[str, Any]:
     chunks = retrieve_context(
         question,
-        limit=REPO_EXPLANATION_LIMIT,
+        limit=NORMAL_QA_LIMIT,
         source_id=source_id,
         source=source,
         source_type=source_type,
@@ -42,20 +42,19 @@ def run(
     if top_score < MIN_SCORE_THRESHOLD:
         return no_evidence_response()
 
-    compacted = compact_chunks(chunks, max_total_chars=12000)
+    compacted = compact_chunks(chunks, max_total_chars=7000)
     citations = build_citations(compacted)
     context_text = build_context_text(compacted)
 
-    prompt = REPO_EXPLANATION_PROMPT.format(
+    prompt = NORMAL_QA_PROMPT.format(
         question=question,
-        chat_context=chat_context or "No recent conversation context.",
         context_text=context_text,
     )
 
     answer = generate_text(
         prompt,
         temperature=0.0,
-        num_predict=REPO_EXPLANATION_NUM_PREDICT,
+        num_predict=NORMAL_QA_NUM_PREDICT,
     )
 
     if answer.strip() == "No evidence found in the knowledge base.":
@@ -64,5 +63,4 @@ def run(
     return {
         "answer": answer,
         "citations": citations,
-        "verification_context_text": context_text,
     }

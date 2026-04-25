@@ -5,7 +5,6 @@ import os
 import time
 from typing import Any, Iterator
 
-from app.answer_verifier import should_verify_answer, verify_answer
 from app.audit import save_audit_event
 from app.chat_history import (
     add_assistant_message,
@@ -129,7 +128,6 @@ def stream_ask_events(
                 "router": routing.get("router"),
                 "question_type": routing.get("question_type"),
                 "source_strategy": routing.get("source_strategy"),
-                "verification_verdict": "pending" if pipeline_used in {"long_explanation", "repo_explanation", "incident_runbook"} else "skipped",
             },
         )
 
@@ -220,52 +218,6 @@ def stream_ask_events(
         if answer == "No evidence found in the knowledge base.":
             citations = []
 
-        verification_result: dict[str, Any] = {
-            "verification_verdict": "skipped",
-            "unsupported_claims": [],
-            "verification_reason": "Verifier skipped for this answer.",
-            "verified": False,
-        }
-
-        if should_verify_answer(
-            pipeline_used=pipeline_used,
-            routing=routing,
-            answer=answer,
-            citations=citations,
-        ):
-            yield _sse(
-                "verification_status",
-                {
-                    "message": "Verifying answer against retrieved evidence...",
-                    "verification_verdict": "running",
-                },
-            )
-
-            verification_result = verify_answer(
-                question=normalized_question,
-                pipeline_used=pipeline_used,
-                context_text=context_text,
-                draft_answer=answer,
-            )
-
-            corrected_answer = verification_result.get("corrected_answer", answer)
-            if corrected_answer.strip():
-                answer = corrected_answer
-
-            if answer.strip() == "No evidence found in the knowledge base.":
-                citations = []
-
-            yield _sse(
-                "verification",
-                {
-                    "verification_verdict": verification_result.get("verification_verdict"),
-                    "unsupported_claims": verification_result.get("unsupported_claims", []),
-                    "verification_reason": verification_result.get("verification_reason"),
-                    "verified": verification_result.get("verified", False),
-                    "corrected_answer": answer,
-                },
-            )
-
         add_assistant_message(
             conversation_id=resolved_conversation_id,
             answer=answer,
@@ -279,7 +231,7 @@ def stream_ask_events(
             conversation_id=resolved_conversation_id,
             question=normalized_question,
             answer=answer,
-            routing={**routing, **verification_result},
+            routing=routing,
             citations=citations,
             model=CHAT_MODEL,
             latency_ms=latency_ms,
@@ -292,10 +244,6 @@ def stream_ask_events(
                 "audit_id": audit_id,
                 "latency_ms": latency_ms,
                 "citations": citations,
-                "verification_verdict": verification_result.get("verification_verdict"),
-                "unsupported_claims": verification_result.get("unsupported_claims", []),
-                "verification_reason": verification_result.get("verification_reason"),
-                "verified": verification_result.get("verified", False),
             },
         )
 

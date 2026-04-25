@@ -27,41 +27,12 @@ Use when the user asks to explain a repo, codebase, files/folders, code snippet,
 Use when the user describes an operational problem, error, alert, outage, failure, latency, broken deployment, rollback, pod issue, Kubernetes issue, or asks what to check first.
 
 Pipeline selection guidance:
-- Use normal_qa for simple direct factual questions, including simple "who", "what", "where", "when", and "why" questions that ask for one fact or one direct reason.
-- Do not choose long_explanation just because the question starts with "why".
-- Use long_explanation only when the user asks for detailed, broad, conceptual, multi-part, step-by-step, deep-dive, or comparison explanation.
 - If the user asks to compare, contrast, differentiate, explain the difference, or asks what each/both things do/prevent, choose long_explanation unless the user explicitly asks about repo files, codebase structure, folders, or implementation files.
-- Use repo_explanation ONLY when the user explicitly asks about a repo, repository, codebase, file/folder structure, project structure, code snippet, configuration block, Terraform code block, workflow file, deployment flow, module structure, or implementation files.
-- Do NOT use repo_explanation for simple concept questions just because they mention Terraform, state, backend, module, provider, Kubernetes, Docker, AWS, or DevOps.
-- Simple questions like "where is state stored?", "what is Terraform state?", "where is X configured?", or "what does X mean?" should use normal_qa unless the user asks to explain repo/code/files.
+- If the user asks about a concept in detail, choose long_explanation.
+- If the user asks about actual code/configuration/snippet/repo structure, choose repo_explanation.
 - If the user asks troubleshooting or "what should I check", choose incident_runbook.
 - If the user asks for a whole document/book/source summary, choose document_summary.
 - Otherwise choose normal_qa.
-
-Simple Q&A examples:
-- "Why did X happen?" -> normal_qa
-- "Who is X?" -> normal_qa
-- "What is X?" -> normal_qa
-- "Where is X?" -> normal_qa
-- "When did X happen?" -> normal_qa
-
-Long explanation examples:
-- "Explain X in detail" -> long_explanation
-- "Give a deep dive on X" -> long_explanation
-- "Explain step by step how X works" -> long_explanation
-- "Compare X and Y" -> long_explanation
-
-Repo/code explanation examples:
-- "Explain this Terraform repo" -> repo_explanation
-- "Explain this code block" -> repo_explanation
-- "Explain this module structure" -> repo_explanation
-- "Explain this deployment workflow file" -> repo_explanation
-
-Normal QA concept examples:
-- "Where is Terraform state stored?" -> normal_qa
-- "What is Terraform state?" -> normal_qa
-- "What is a backend?" -> normal_qa
-- "Where is the state stored?" -> normal_qa
 
 Source strategy guidance:
 - For comparison questions, set source_strategy to allow_multiple_sources.
@@ -338,69 +309,4 @@ Retrieved Context:
 {context_text}
 
 Return only the answer text.
-""".strip()
-
-VERIFIER_PROMPT = """
-You are the answer verification and correction layer for InfraRAG.
-
-Your job is to check whether the draft answer is supported by the retrieved context, then return a safe final answer.
-
-Use ONLY the retrieved context.
-Do NOT use general knowledge.
-Do NOT add new facts.
-Do NOT keep unsupported claims.
-
-You must detect:
-- unsupported claims
-- overgeneralised claims
-- invented similarities
-- invented differences
-- invented files, commands, people, causes, outcomes, resources, or relationships
-- claims that are stronger than the evidence
-- comparison claims using "both", "same", "similar", "difference", "all", or "always"
-
-Verdict rules:
-- Use "valid" only if every important claim is supported.
-- Use "needs_revision" if the draft contains unsupported or overgeneralised parts but a useful supported answer can still be written.
-- Use "insufficient_evidence" only if the retrieved context cannot support any useful answer.
-- If you remove, narrow, or rewrite unsupported parts, the verdict MUST be "needs_revision".
-- Do not use any other verdict.
-
-Correction rules:
-- corrected_answer must be the final user-facing answer.
-- corrected_answer must never repeat unsupported draft claims.
-- If the draft is partly wrong, rewrite it using only supported evidence.
-- If the draft says two things are similar but the context only supports separate facts, explain them separately.
-- For comparisons, explain each side separately first, then give only supported differences.
-- Only say "both" if the same point is clearly supported for both sides.
-- If two concepts prevent different problems, say that clearly.
-- If useful evidence exists for each side, do NOT return insufficient_evidence.
-- Do NOT return the original draft unchanged when verdict is needs_revision or insufficient_evidence.
-
-Return JSON only.
-No markdown.
-No prose before JSON.
-No prose after JSON.
-
-Required JSON:
-{{
-  "verdict": "needs_revision",
-  "unsupported_claims": [
-    "unsupported claim 1"
-  ],
-  "corrected_answer": "safe final answer using only retrieved context",
-  "reason": "short verification reason"
-}}
-
-Question:
-{question}
-
-Pipeline:
-{pipeline_used}
-
-Retrieved context:
-{context_text}
-
-Draft answer:
-{draft_answer}
 """.strip()

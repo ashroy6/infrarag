@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
-from app.answer_verifier import should_verify_answer, verify_answer
 from app.audit import save_audit_event
 from app.chat_history import (
     add_assistant_message,
@@ -75,12 +75,13 @@ def run_ask(
     started = time.perf_counter()
     normalized_question = normalize_question(question)
 
+    routing = decide_intent(normalized_question)
+    selected_pipeline = routing.get("pipeline_used", "normal_qa")
+
     resolved_conversation_id = ensure_conversation(conversation_id, normalized_question)
     add_user_message(resolved_conversation_id, normalized_question)
 
     chat_context = get_recent_chat_context(resolved_conversation_id, limit=10)
-    routing = decide_intent(normalized_question, chat_context=chat_context)
-    selected_pipeline = routing.get("pipeline_used", "normal_qa")
 
     result = _run_selected_pipeline(
         pipeline_used=selected_pipeline,
@@ -100,30 +101,6 @@ def run_ask(
     if answer.strip() == "No evidence found in the knowledge base.":
         citations = []
 
-    verification_result: dict[str, Any] = {
-        "verification_verdict": "skipped",
-        "unsupported_claims": [],
-        "verification_reason": "Verifier skipped for this answer.",
-        "verified": False,
-    }
-
-    if should_verify_answer(
-        pipeline_used=selected_pipeline,
-        routing=routing,
-        answer=answer,
-        citations=citations,
-    ):
-        verification_result = verify_answer(
-            question=normalized_question,
-            pipeline_used=selected_pipeline,
-            context_text=result.get("verification_context_text", ""),
-            draft_answer=answer,
-        )
-        answer = verification_result.get("corrected_answer", answer)
-
-        if answer.strip() == "No evidence found in the knowledge base.":
-            citations = []
-
     add_assistant_message(
         conversation_id=resolved_conversation_id,
         answer=answer,
@@ -138,7 +115,7 @@ def run_ask(
         conversation_id=resolved_conversation_id,
         question=normalized_question,
         answer=answer,
-        routing={**routing, **verification_result},
+        routing=routing,
         citations=citations,
         model=CHAT_MODEL,
         latency_ms=latency_ms,
@@ -157,14 +134,10 @@ def run_ask(
         "intent_reason": routing.get("reason"),
         "router": routing.get("router"),
         "latency_ms": latency_ms,
-        "verification_verdict": verification_result.get("verification_verdict"),
-        "unsupported_claims": verification_result.get("unsupported_claims", []),
-        "verification_reason": verification_result.get("verification_reason"),
-        "verified": verification_result.get("verified", False),
     }
 
     for key, value in result.items():
-        if key not in response and key not in {"answer", "citations", "verification_context_text"}:
+        if key not in response and key not in {"answer", "citations"}:
             response[key] = value
 
     return response

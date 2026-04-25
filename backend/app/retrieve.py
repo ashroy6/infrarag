@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from typing import Any
 
 from app.embedding_service import get_embedding
 from app.qdrant_client import search
+from app.query_planner import plan_query
 from app.reranker import rerank_hits
-
 
 STOP_WORDS = {
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
     "do", "does", "did", "what", "which", "who", "whom", "this", "that",
-    "these", "those", " and", "or", "but", "if", "then", "else", "for",
+    "these", "those", "and", "or", "but", "if", "then", "else", "for",
     "to", "of", "in", "on", "at", "by", "with", "from", "as", "it", "its",
     "about", "into", "over", "under", "than", "how", "why", "when", "where",
     "can", "could", "should", "would", "will", "may", "might", "tell", "me",
@@ -23,11 +24,6 @@ _PAGE_RANGE_RE = re.compile(
     re.IGNORECASE,
 )
 
-UK_POSTCODE_RE = re.compile(
-    r"\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b",
-    re.IGNORECASE,
-)
-
 
 def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
@@ -36,19 +32,7 @@ def _normalize_text(text: str) -> str:
 def _tokenize(text: str) -> list[str]:
     normalized = _normalize_text(text)
     tokens = re.findall(r"[a-zA-Z0-9_\-/.]+", normalized)
-    return [t for t in tokens if t not in STOP_WORDS and len(t) > 1]
-
-
-def _unique_preserve_order(items: list[str]) -> list[str]:
-    seen = set()
-    out = []
-
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            out.append(item)
-
-    return out
+    return [token for token in tokens if token not in STOP_WORDS and len(token) > 1]
 
 
 def _extract_page_range(query: str) -> tuple[int | None, int | None]:
@@ -68,429 +52,15 @@ def _extract_page_range(query: str) -> tuple[int | None, int | None]:
     return None, None
 
 
-def _detect_query_intent(query: str) -> str:
-    q = _normalize_text(query)
-
-    contact_terms = {
-        "address",
-        "registered office",
-        "office address",
-        "company address",
-        "postcode",
-        "post code",
-        "company number",
-        "registration number",
-        "registered in",
-        "registered company",
-        "contact address",
-        "office location",
-    }
-
-    repo_terms = {
-        "repo",
-        "repository",
-        "project",
-        "overview",
-        "purpose",
-        "summary",
-        "readme",
-        "architecture",
-        "workflow",
-        "pipeline",
-        "what does this repo do",
-        "what is this repo",
-        "what does this project do",
-    }
-
-    code_terms = {
-        "function",
-        "class",
-        "method",
-        "code",
-        "script",
-        "file",
-        "module",
-        "bug",
-        "logic",
-        "implementation",
-        "what does this code do",
-        "why does",
-    }
-
-    cicd_terms = {
-        "ci",
-        "cd",
-        "cicd",
-        "github actions",
-        "workflow",
-        "pipeline",
-        "deploy",
-        "deployment",
-        "build",
-        "test",
-        "release",
-    }
-
-    infra_terms = {
-        "terraform",
-        "aws",
-        "azure",
-        "gcp",
-        "kubernetes",
-        "helm",
-        "vpc",
-        "iam",
-        "s3",
-        "eks",
-        "rds",
-        "infra",
-        "infrastructure",
-    }
-
-    document_terms = {
-        "book",
-        "chapter",
-        "pages",
-        "page",
-        "foreword",
-        "contents",
-        "author",
-        "translator",
-        "appendix",
-        "section",
-        "document",
-        "pdf",
-    }
-
-    if any(term in q for term in contact_terms):
-        return "contact"
-    if any(term in q for term in document_terms):
-        return "document"
-    if any(term in q for term in repo_terms):
-        return "repo"
-    if any(term in q for term in cicd_terms):
-        return "cicd"
-    if any(term in q for term in infra_terms):
-        return "infra"
-    if any(term in q for term in code_terms):
-        return "code"
-
-    return "general"
+def _source_key(hit: dict[str, Any]) -> str:
+    return str(hit.get("source_id") or hit.get("source") or "unknown")
 
 
-def _extract_query_terms(query: str) -> list[str]:
-    raw_terms = _tokenize(query)
-    expanded = list(raw_terms)
-
-    q = _normalize_text(query)
-    intent = _detect_query_intent(query)
-
-    if intent == "contact":
-        expanded.extend(
-            [
-                "address",
-                "registered",
-                "office",
-                "registered office",
-                "company",
-                "company number",
-                "registration number",
-                "registered company",
-                "registered in",
-                "postcode",
-                "post code",
-                "contact",
-                "location",
-            ]
-        )
-
-    elif intent == "repo":
-        expanded.extend(
-            [
-                "readme",
-                "overview",
-                "purpose",
-                "project",
-                "repository",
-                "workflow",
-                "pipeline",
-                "architecture",
-            ]
-        )
-
-    elif intent == "cicd":
-        expanded.extend(
-            [
-                "ci",
-                "cd",
-                "pipeline",
-                "workflow",
-                "github",
-                "actions",
-                "build",
-                "test",
-                "deploy",
-                "release",
-            ]
-        )
-
-    elif intent == "infra":
-        expanded.extend(
-            [
-                "terraform",
-                "cloud",
-                "aws",
-                "azure",
-                "gcp",
-                "kubernetes",
-                "infrastructure",
-                "module",
-                "resource",
-                "deployment",
-                "cluster",
-            ]
-        )
-
-    elif intent == "code":
-        expanded.extend(
-            [
-                "function",
-                "class",
-                "module",
-                "script",
-                "logic",
-                "implementation",
-            ]
-        )
-
-    elif intent == "document":
-        expanded.extend(
-            [
-                "document",
-                "book",
-                "chapter",
-                "pages",
-                "page",
-                "section",
-                "contents",
-                "summary",
-                "author",
-                "appendix",
-            ]
-        )
-
-    if "readme" in q:
-        expanded.extend(["overview", "purpose", "summary"])
-
-    return _unique_preserve_order(expanded)
-
-
-def _keyword_overlap_score(query_terms: list[str], text: str, source: str) -> float:
-    haystack_tokens = set(_tokenize(f"{source}\n{text}"))
-    query_token_set = set(query_terms)
-
-    matched_terms = query_token_set.intersection(haystack_tokens)
-    if not matched_terms:
-        return 0.0
-
-    coverage = len(matched_terms) / max(len(query_token_set), 1)
-    dense_bonus = min(len(matched_terms) * 0.03, 0.18)
-    return coverage + dense_bonus
-
-
-def _source_boost(hit: dict[str, Any], intent: str, query_terms: list[str]) -> float:
-    source = (hit.get("source", "") or "").lower()
-    source_type = (hit.get("source_type", "") or "").lower()
-    file_type = (hit.get("file_type", "") or "").lower()
-
-    boost = 0.0
-
-    is_readme = "readme" in source
-    is_docs = source.endswith(".md") or source.endswith(".rst") or source.endswith(".txt") or "/docs/" in source
-    is_ci = ".github/workflows/" in source or source.endswith(".yml") or source.endswith(".yaml")
-    is_code = source.endswith((".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".rs"))
-    is_infra = (
-        source.endswith(".tf")
-        or source.endswith(".tfvars")
-        or "terraform" in source
-        or "helm" in source
-        or "k8s" in source
-        or "kubernetes" in source
-    )
-    is_test = "/tests/" in source or "test_" in source or source.endswith("_test.py")
-    is_pdf = file_type == ".pdf"
-    is_upload = source_type == "upload"
-
-    if intent == "contact":
-        if is_pdf:
-            boost += 0.10
-        if is_upload:
-            boost += 0.05
-        if file_type in {".pdf", ".md", ".txt"}:
-            boost += 0.05
-
-    elif intent == "repo":
-        if is_readme:
-            boost += 0.20
-        if is_docs:
-            boost += 0.10
-        if is_ci:
-            boost += 0.02
-        if is_test:
-            boost -= 0.04
-
-    elif intent == "cicd":
-        if is_ci:
-            boost += 0.20
-        if is_readme:
-            boost += 0.04
-        if is_docs:
-            boost += 0.03
-        if is_code:
-            boost += 0.02
-
-    elif intent == "infra":
-        if is_infra:
-            boost += 0.20
-        if is_docs:
-            boost += 0.05
-        if is_readme:
-            boost += 0.03
-
-    elif intent == "code":
-        if is_code:
-            boost += 0.18
-        if is_test:
-            boost += 0.03
-        if is_readme:
-            boost -= 0.02
-
-    elif intent == "document":
-        if is_pdf:
-            boost += 0.12
-        if is_upload:
-            boost += 0.05
-
-    else:
-        if is_readme:
-            boost += 0.06
-        if is_docs:
-            boost += 0.04
-
-    for term in query_terms:
-        if term and term in source:
-            boost += 0.01
-
-    return boost
-
-
-def _section_boost(text: str, intent: str) -> float:
-    t = (text or "").lower()
-    boost = 0.0
-
-    repo_section_terms = [
-        "project purpose",
-        "overview",
-        "what it does",
-        "architecture",
-        "workflow",
-        "pipeline",
-        "summary",
-        "introduction",
-    ]
-
-    cicd_terms = [
-        "github actions",
-        "workflow",
-        "build",
-        "test",
-        "deploy",
-        "deployment",
-        "job",
-        "stage",
-    ]
-
-    infra_terms = [
-        "terraform",
-        "kubernetes",
-        "aws",
-        "azure",
-        "gcp",
-        "helm",
-        "module",
-        "resource",
-        "cluster",
-        "infrastructure",
-    ]
-
-    document_terms = [
-        "contents",
-        "foreword",
-        "chapter",
-        "section",
-        "appendix",
-        "introduction",
-    ]
-
-    contact_terms = [
-        "registered office",
-        "company number",
-        "registration number",
-        "registered in",
-        "office address",
-        "company address",
-        "postcode",
-        "post code",
-        "contact address",
-    ]
-
-    if intent == "contact":
-        if any(term in t for term in contact_terms):
-            boost += 0.30
-        if UK_POSTCODE_RE.search(text or ""):
-            boost += 0.18
-
-    elif intent == "repo" and any(term in t for term in repo_section_terms):
-        boost += 0.10
-
-    elif intent == "cicd" and any(term in t for term in cicd_terms):
-        boost += 0.10
-
-    elif intent == "infra" and any(term in t for term in infra_terms):
-        boost += 0.10
-
-    elif intent == "document" and any(term in t for term in document_terms):
-        boost += 0.10
-
-    return boost
-
-
-def _normalize_vector_score(score: float) -> float:
-    if score is None:
-        return 0.0
-    return max(0.0, min(float(score), 1.0))
-
-
-def _hybrid_score(hit: dict[str, Any], query_terms: list[str], intent: str) -> float:
-    vector_score = _normalize_vector_score(hit.get("score", 0.0))
-    source = hit.get("source", "") or ""
-    text = hit.get("text", "") or ""
-
-    keyword_score = _keyword_overlap_score(query_terms, text, source)
-    file_boost = _source_boost(hit, intent, query_terms)
-    section_boost = _section_boost(text, intent)
-
-    raw_hybrid = (
-        (0.70 * vector_score)
-        + (0.20 * min(keyword_score, 1.0))
-        + file_boost
-        + section_boost
-    )
-
-    if intent in {"repo", "document", "contact"} and len(text.split()) < 15:
-        raw_hybrid -= 0.03
-
-    return round(max(0.0, min(raw_hybrid, 0.9999)), 6)
+def _query_key(hit: dict[str, Any]) -> int:
+    try:
+        return int(hit.get("retrieval_query_index", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _dedupe_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -499,9 +69,10 @@ def _dedupe_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     for hit in hits:
         key = (
-            hit.get("source", ""),
+            hit.get("source_id") or hit.get("source", ""),
             hit.get("chunk_index", -1),
         )
+
         if key in seen:
             continue
 
@@ -509,6 +80,242 @@ def _dedupe_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
         deduped.append(hit)
 
     return deduped
+
+
+def _keyword_overlap_score(query: str, text: str, source: str) -> float:
+    query_terms = set(_tokenize(query))
+    if not query_terms:
+        return 0.0
+
+    haystack = set(_tokenize(f"{source}\n{text}"))
+    matched = query_terms.intersection(haystack)
+
+    if not matched:
+        return 0.0
+
+    return min(1.0, len(matched) / max(len(query_terms), 1))
+
+
+def _normalize_score(score: Any) -> float:
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return 0.0
+
+    return max(0.0, min(value, 1.0))
+
+
+def _hit_score(hit: dict[str, Any]) -> float:
+    for key in ("reranker_score", "score", "pre_cluster_score", "vector_score"):
+        if key in hit:
+            return _normalize_score(hit.get(key))
+    return 0.0
+
+
+def _source_cluster_scores(hits: list[dict[str, Any]]) -> dict[str, float]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for hit in hits:
+        groups[_source_key(hit)].append(hit)
+
+    scores_by_source: dict[str, float] = {}
+
+    for key, items in groups.items():
+        scores = sorted(
+            [_normalize_score(item.get("pre_cluster_score", item.get("score", 0.0))) for item in items],
+            reverse=True,
+        )
+
+        top_scores = scores[:5]
+        avg_top = sum(top_scores) / max(len(top_scores), 1)
+        max_score = max(scores) if scores else 0.0
+        count_bonus = min(len(items), 6) * 0.025
+
+        scores_by_source[key] = round((0.65 * avg_top) + (0.25 * max_score) + count_bonus, 6)
+
+    return scores_by_source
+
+
+def _best_source_per_query(hits: list[dict[str, Any]]) -> set[str]:
+    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+
+    for hit in hits:
+        grouped[_query_key(hit)].append(hit)
+
+    selected: set[str] = set()
+
+    for _, query_hits in grouped.items():
+        source_scores = _source_cluster_scores(query_hits)
+        if not source_scores:
+            continue
+
+        best_source = max(source_scores.items(), key=lambda item: item[1])[0]
+        selected.add(best_source)
+
+    return selected
+
+
+def _preserve_query_diversity(hits: list[dict[str, Any]], per_query: int) -> list[dict[str, Any]]:
+    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+
+    for hit in hits:
+        grouped[_query_key(hit)].append(hit)
+
+    preserved: list[dict[str, Any]] = []
+
+    for _, query_hits in grouped.items():
+        query_hits.sort(
+            key=lambda item: (
+                _normalize_score(item.get("pre_cluster_score", item.get("score", 0.0))),
+                _normalize_score(item.get("vector_score", 0.0)),
+            ),
+            reverse=True,
+        )
+        preserved.extend(query_hits[:per_query])
+
+    return _dedupe_hits(preserved)
+
+
+def _cluster_sources(hits: list[dict[str, Any]], strategy: str) -> list[dict[str, Any]]:
+    if not hits:
+        return []
+
+    source_scores = _source_cluster_scores(hits)
+
+    if not source_scores:
+        return []
+
+    ranked_sources = sorted(source_scores.items(), key=lambda item: item[1], reverse=True)
+
+    if strategy == "allow_multiple_sources":
+        selected_keys = set()
+
+        # Keep the strongest source per rewritten query so one topic cannot dominate.
+        selected_keys.update(_best_source_per_query(hits))
+
+        # Also keep a few globally strong source clusters.
+        selected_keys.update(key for key, _ in ranked_sources[:5])
+    else:
+        selected_keys = {ranked_sources[0][0]}
+
+    clustered: list[dict[str, Any]] = []
+
+    for hit in hits:
+        key = _source_key(hit)
+        if key not in selected_keys:
+            continue
+
+        item = dict(hit)
+        cluster_score = source_scores.get(key, 0.0)
+        item["source_cluster_score"] = cluster_score
+        item["score"] = round(
+            (0.78 * _normalize_score(item.get("score", 0.0))) + (0.22 * cluster_score),
+            6,
+        )
+        clustered.append(item)
+
+    clustered.sort(
+        key=lambda item: (
+            item.get("score", 0.0),
+            item.get("source_cluster_score", 0.0),
+            item.get("vector_score", 0.0),
+        ),
+        reverse=True,
+    )
+
+    return clustered
+
+
+def _diversify_final_hits(hits: list[dict[str, Any]], top_n: int, strategy: str) -> list[dict[str, Any]]:
+    if strategy != "allow_multiple_sources" or not hits:
+        return hits[:top_n]
+
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for hit in hits:
+        grouped[_source_key(hit)].append(hit)
+
+    for source_hits in grouped.values():
+        source_hits.sort(key=_hit_score, reverse=True)
+
+    ranked_sources = sorted(
+        grouped.keys(),
+        key=lambda source_id: _hit_score(grouped[source_id][0]),
+        reverse=True,
+    )
+
+    selected: list[dict[str, Any]] = []
+    seen = set()
+
+    # First pass: keep best hit from several sources.
+    for source_id in ranked_sources[: min(4, top_n)]:
+        hit = grouped[source_id][0]
+        key = (_source_key(hit), hit.get("chunk_index", -1))
+        if key not in seen:
+            seen.add(key)
+            selected.append(hit)
+
+    # Second pass: fill remaining slots by best overall score.
+    for hit in sorted(hits, key=_hit_score, reverse=True):
+        if len(selected) >= top_n:
+            break
+
+        key = (_source_key(hit), hit.get("chunk_index", -1))
+        if key in seen:
+            continue
+
+        seen.add(key)
+        selected.append(hit)
+
+    selected.sort(key=_hit_score, reverse=True)
+    return selected[:top_n]
+
+
+def _multi_query_search(
+    queries: list[str],
+    candidate_top_k: int,
+    source_id: str | None,
+    source: str | None,
+    source_type: str | None,
+    file_type: str | None,
+    page_start: int | None,
+    page_end: int | None,
+) -> list[dict[str, Any]]:
+    all_hits: list[dict[str, Any]] = []
+
+    for query_index, retrieval_query in enumerate(queries):
+        query_vector = get_embedding(retrieval_query)
+
+        hits = search(
+            query_vector=query_vector,
+            limit=candidate_top_k,
+            source_id=source_id,
+            source=source,
+            source_type=source_type,
+            file_type=file_type,
+            page_start=page_start,
+            page_end=page_end,
+        )
+
+        for hit in hits:
+            item = dict(hit)
+            vector_score = _normalize_score(hit.get("score", 0.0))
+            lexical_score = _keyword_overlap_score(
+                retrieval_query,
+                hit.get("text", "") or "",
+                hit.get("source", "") or "",
+            )
+
+            item["vector_score"] = vector_score
+            item["lexical_score"] = round(lexical_score, 6)
+            item["retrieval_query"] = retrieval_query
+            item["retrieval_query_index"] = query_index
+            item["pre_cluster_score"] = round((0.76 * vector_score) + (0.24 * lexical_score), 6)
+            item["score"] = item["pre_cluster_score"]
+
+            all_hits.append(item)
+
+    return _dedupe_hits(all_hits)
 
 
 def retrieve_context(
@@ -520,35 +327,41 @@ def retrieve_context(
     file_type: str | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
+    retrieval_plan: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     safe_limit = max(1, min(int(limit), 50))
-    inferred_page_start, inferred_page_end = _extract_page_range(query)
 
+    inferred_page_start, inferred_page_end = _extract_page_range(query)
     if page_start is None:
         page_start = inferred_page_start
     if page_end is None:
         page_end = inferred_page_end
 
-    intent = _detect_query_intent(query)
-    query_terms = _extract_query_terms(query)
+    plan = retrieval_plan or plan_query(query)
 
-    if (
-        page_start is not None
-        and page_end is not None
-        and source_type is None
-        and file_type is None
-        and source_id is None
-        and source is None
-    ):
-        source_type = "upload"
-        file_type = ".pdf"
+    rewritten_queries = plan.get("rewritten_queries") or [query]
+    rewritten_queries = [
+        re.sub(r"\s+", " ", str(item or "").strip())
+        for item in rewritten_queries
+        if str(item or "").strip()
+    ]
 
-    query_vector = get_embedding(query)
-    candidate_limit = max(safe_limit * 5, 30)
+    if query not in rewritten_queries:
+        rewritten_queries.insert(0, query)
 
-    initial_hits = search(
-        query_vector=query_vector,
-        limit=candidate_limit,
+    rewritten_queries = rewritten_queries[:5]
+
+    candidate_top_k = max(
+        safe_limit * 5,
+        int(plan.get("candidate_top_k", 40) or 40),
+    )
+    candidate_top_k = max(10, min(candidate_top_k, 80))
+
+    source_strategy = str(plan.get("source_strategy") or "cluster_by_best_source")
+
+    raw_hits = _multi_query_search(
+        queries=rewritten_queries,
+        candidate_top_k=candidate_top_k,
         source_id=source_id,
         source=source,
         source_type=source_type,
@@ -557,35 +370,33 @@ def retrieve_context(
         page_end=page_end,
     )
 
-    initial_hits = _dedupe_hits(initial_hits)
+    if not raw_hits:
+        return []
 
-    reranked = []
-    for hit in initial_hits:
-        hit_copy = dict(hit)
-        hit_copy["vector_score"] = _normalize_vector_score(hit.get("score", 0.0))
-        hit_copy["hybrid_score"] = _hybrid_score(hit_copy, query_terms, intent)
-        hit_copy["intent"] = intent
-        reranked.append(hit_copy)
+    if source_strategy == "allow_multiple_sources":
+        raw_hits = _preserve_query_diversity(
+            raw_hits,
+            per_query=max(8, safe_limit),
+        )
 
-    reranked.sort(
-        key=lambda x: (
-            x.get("hybrid_score", 0.0),
-            x.get("vector_score", 0.0),
-            -len((x.get("text", "") or "").split()),
-        ),
-        reverse=True,
-    )
+    clustered_hits = _cluster_sources(raw_hits, source_strategy)
 
-    hybrid_hits = []
-    for hit in reranked:
-        item = dict(hit)
-        item["score"] = item["hybrid_score"]
-        hybrid_hits.append(item)
+    if not clustered_hits:
+        return []
 
-    final_hits = rerank_hits(
+    final_top_k = max(safe_limit, int(plan.get("final_top_k", safe_limit) or safe_limit))
+    final_top_k = max(1, min(final_top_k, 12))
+
+    reranked = rerank_hits(
         question=query,
-        hits=hybrid_hits,
-        top_n=safe_limit,
+        hits=clustered_hits,
+        top_n=max(final_top_k * 2, final_top_k),
     )
 
-    return final_hits
+    diversified = _diversify_final_hits(
+        reranked,
+        top_n=final_top_k,
+        strategy=source_strategy,
+    )
+
+    return diversified[:safe_limit]

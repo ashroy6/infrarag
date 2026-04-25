@@ -43,6 +43,7 @@ def run(
         return no_evidence_response()
 
     compacted = compact_chunks(chunks, max_total_chars=11000)
+    citations = build_citations(compacted)
     context_text = build_context_text(compacted)
 
     prompt = LONG_EXPLANATION_PROMPT.format(
@@ -57,7 +58,11 @@ def run(
         num_predict=LONG_EXPLANATION_NUM_PREDICT,
     )
 
+    if answer.strip() == "No evidence found in the knowledge base.":
+        return no_evidence_response()
+
     return {
         "answer": answer,
-        "citations": build_citations(compacted),
+        "citations": citations,
+        "verification_context_text": context_text,
     }

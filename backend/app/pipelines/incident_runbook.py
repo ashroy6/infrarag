@@ -9,6 +9,7 @@ from app.prompts import INCIDENT_RUNBOOK_PROMPT
 from app.response_formatter import no_evidence_response
 from app.retrieve import retrieve_context
 
+MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "0.35"))
 INCIDENT_RUNBOOK_LIMIT = int(os.getenv("INCIDENT_RUNBOOK_LIMIT", "8"))
 INCIDENT_RUNBOOK_NUM_PREDICT = int(os.getenv("INCIDENT_RUNBOOK_NUM_PREDICT", "1200"))
 
@@ -23,14 +24,8 @@ def run(
     page_start: int | None = None,
     page_end: int | None = None,
 ) -> dict[str, Any]:
-    expanded_question = (
-        f"{question}\n"
-        "Prioritize runbooks, troubleshooting docs, Kubernetes docs, deployment docs, rollback docs, "
-        "monitoring docs, logs, alerts, and operational procedures."
-    )
-
     chunks = retrieve_context(
-        expanded_question,
+        question,
         limit=INCIDENT_RUNBOOK_LIMIT,
         source_id=source_id,
         source=source,
@@ -43,7 +38,12 @@ def run(
     if not chunks:
         return no_evidence_response()
 
+    top_score = max(float(c.get("score", 0.0) or 0.0) for c in chunks)
+    if top_score < MIN_SCORE_THRESHOLD:
+        return no_evidence_response()
+
     compacted = compact_chunks(chunks, max_total_chars=10000)
+    citations = build_citations(compacted)
     context_text = build_context_text(compacted)
 
     prompt = INCIDENT_RUNBOOK_PROMPT.format(
@@ -58,7 +58,11 @@ def run(
         num_predict=INCIDENT_RUNBOOK_NUM_PREDICT,
     )
 
+    if answer.strip() == "No evidence found in the knowledge base.":
+        return no_evidence_response()
+
     return {
         "answer": answer,
-        "citations": build_citations(compacted),
+        "citations": citations,
+        "verification_context_text": context_text,
     }

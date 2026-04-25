@@ -271,7 +271,7 @@
 
     .message {
       max-width: 980px;
-      margin: 0 auto 8px;
+      margin: 0 auto 10px;
       display: grid;
       grid-template-columns: 38px 1fr;
       gap: 10px;
@@ -301,9 +301,9 @@
 
     .bubble {
       border-radius: 14px;
-      padding: 10px 12px;
-      line-height: 1.45;
-      white-space: normal;
+      padding: 12px 14px;
+      line-height: 1.55;
+      white-space: pre-wrap;
       word-break: break-word;
       border: 1px solid var(--border);
       box-shadow: var(--shadow);
@@ -312,7 +312,6 @@
     .user-message .bubble {
       background: var(--user-bubble);
       color: #ffffff;
-      white-space: pre-wrap;
     }
 
     .assistant-message .bubble {
@@ -325,7 +324,7 @@
       border: 1px solid #3a3a3a;
       border-radius: 10px;
       padding: 8px 10px;
-      margin: 0 0 8px 0;
+      margin-bottom: 10px;
       font-size: 13px;
       color: #d1d5db;
       white-space: normal;
@@ -338,10 +337,9 @@
     }
 
     .assistant-answer {
-      margin-top: 0;
+      margin-top: 2px;
       font-size: 15px;
       color: #f3f4f6;
-      white-space: pre-wrap;
     }
 
     .citations {
@@ -854,7 +852,6 @@
               <div><strong>Pipeline:</strong> ${escapeHtml(pipelineLabel)}</div>
               <div><strong>Planner confidence:</strong> ${escapeHtml(meta.intent_confidence ?? "n/a")}</div>
               <div><strong>Router:</strong> ${escapeHtml(meta.router ?? "n/a")}</div>
-              <div><strong>Verifier:</strong> ${escapeHtml(meta.verification_verdict ?? "n/a")}</div>
               <div><strong>Latency:</strong> ${escapeHtml(meta.latency_ms ? `${meta.latency_ms} ms` : "n/a")}</div>
             </div>
             <div style="margin-top:6px;"><strong>Reason:</strong> ${escapeHtml(meta.intent_reason || "n/a")}</div>
@@ -1150,7 +1147,6 @@
             intent_reason: data.intent_reason,
             router: data.router,
             latency_ms: "",
-            verification_verdict: data.verification_verdict || "pending",
           };
 
           updateLastAssistant(answer || "Searching sources...", { meta, citations });
@@ -1166,28 +1162,6 @@
           const data = JSON.parse(event.data);
           answer += data.token || "";
           updateLastAssistant(answer || "Thinking...", { meta, citations });
-        });
-
-        eventSource.addEventListener("verification_status", event => {
-          const data = JSON.parse(event.data);
-          meta.verification_verdict = data.verification_verdict || "running";
-          updateLastAssistant(answer || data.message || "Verifying answer...", { meta, citations });
-        });
-
-        eventSource.addEventListener("verification", event => {
-          const data = JSON.parse(event.data);
-
-          if (data.corrected_answer) {
-            answer = data.corrected_answer;
-          }
-
-          meta.verification_verdict = data.verification_verdict || "verified";
-          meta.verification_reason = data.verification_reason || "";
-          meta.unsupported_claims = Array.isArray(data.unsupported_claims)
-            ? data.unsupported_claims
-            : [];
-
-          updateLastAssistant(answer, { meta, citations });
         });
 
         eventSource.addEventListener("summary_job", event => {
@@ -1212,18 +1186,6 @@
 
           if (Array.isArray(data.citations)) {
             citations = data.citations;
-          }
-
-          if (data.verification_verdict) {
-            meta.verification_verdict = data.verification_verdict;
-          }
-
-          if (data.verification_reason) {
-            meta.verification_reason = data.verification_reason;
-          }
-
-          if (Array.isArray(data.unsupported_claims)) {
-            meta.unsupported_claims = data.unsupported_claims;
           }
 
           const finalAnswer = answer.trim()
