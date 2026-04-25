@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InfraRAG</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 1200px;
+      margin: 48px auto;
+      padding: 0 20px;
+      background: #fafafa;
+      color: #222;
+      font-size: 19px;
+      line-height: 1.6;
+    }
+    h1 { margin-bottom: 10px; font-size: 2.4rem; }
+    p.subtitle { margin-top: 0; margin-bottom: 28px; color: #555; font-size: 1.15rem; }
+    .topbar { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+    .topbar a {
+      text-decoration: none; background: #111827; color: white; padding: 10px 14px;
+      border-radius: 8px; display: inline-block; font-size: 16px;
+    }
+    .topbar a:hover { background: #1f2937; }
+    .card { background: #fff; border: 1px solid #ddd; border-radius: 12px; padding: 20px; margin-bottom: 24px; }
+    .row { display: flex; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+    input[type="text"],
+    input[type="number"],
+    select {
+      flex: 1;
+      min-width: 220px;
+      padding: 12px;
+      font-size: 17px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #fff;
+    }
+    input[type="file"] {
+      flex: 1; min-width: 300px; padding: 10px; font-size: 17px;
+      background: #fff; border: 1px solid #ccc; border-radius: 6px;
+    }
+    button {
+      padding: 12px 18px; cursor: pointer; border: none; border-radius: 6px;
+      background: #111827; color: white; font-size: 17px;
+    }
+    button:hover { background: #1f2937; }
+    pre {
+      background: #f4f4f4; padding: 18px; border-radius: 8px; white-space: pre-wrap;
+      word-wrap: break-word; overflow-x: auto; min-height: 140px; font-size: 17px; line-height: 1.55;
+    }
+    .status { font-size: 16px; color: #444; margin-top: 10px; }
+    .label { font-size: 16px; font-weight: bold; margin-bottom: 10px; display: block; }
+    .hint { font-size: 15px; color: #666; margin-top: 6px; }
+    .output-answer {
+      color: #8b0000; font-weight: 600; white-space: pre-wrap; word-wrap: break-word; margin-bottom: 18px;
+    }
+    .output-section-title { font-size: 16px; font-weight: bold; margin-bottom: 8px; }
+    .output-citations { color: inherit; }
+    .subtle { color: #666; font-size: 15px; }
+    .inline-check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 15px;
+      color: #444;
+      min-width: 220px;
+    }
+    .inline-check input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      margin: 0;
+    }
+    .source-summary {
+      font-size: 14px;
+      color: #666;
+      margin-top: -4px;
+      margin-bottom: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a href="/admin.html">Open Admin UI</a>
+  </div>
+
+  <h1>InfraRAG</h1>
+  <p class="subtitle">Ask questions over your DevOps, Terraform, AWS, and engineering docs. You can also upload a file or a whole folder and ingest it.</p>
+
+  <div class="card">
+    <label class="label" for="question">Ask a question</label>
+
+    <div class="row">
+      <input id="question" type="text" placeholder="Ask a DevOps / Terraform / AWS / document question" />
+      <button onclick="askQuestion()">Ask</button>
+    </div>
+
+    <div class="row">
+      <input id="sourceSearch" type="text" placeholder="Search sources by name/path (optional)" oninput="renderSourceOptions()" />
+      <select id="sourceTypeFilter" onchange="renderSourceOptions()">
+        <option value="">All source types</option>
+        <option value="upload">Uploads</option>
+        <option value="git">Git</option>
+        <option value="local">Local</option>
+      </select>
+      <label class="inline-check">
+        <input id="showAllSources" type="checkbox" onchange="renderSourceOptions()" />
+        Show all sources
+      </label>
+    </div>
+
+    <div class="row">
+      <select id="sourceSelect">
+        <option value="">All sources</option>
+      </select>
+
+      <input id="pageStart" type="number" min="1" placeholder="Page start (optional)" />
+      <input id="pageEnd" type="number" min="1" placeholder="Page end (optional)" />
+    </div>
+
+    <div id="sourceSummary" class="source-summary">Loading sources...</div>
+    <div class="subtle">By default only the most recent 20 sources are shown. Use search, type filter, or “Show all sources” if needed.</div>
+  </div>
+
+  <div class="card">
+    <label class="label" for="fileInput">Upload and ingest a file</label>
+    <div class="row">
+      <input id="fileInput" type="file" />
+      <button onclick="uploadFile()">Upload File</button>
+    </div>
+    <div class="status" id="uploadStatus">No single file uploaded yet.</div>
+  </div>
+
+  <div class="card">
+    <label class="label" for="folderInput">Upload and ingest a folder</label>
+    <div class="row">
+      <input id="folderInput" type="file" webkitdirectory directory multiple />
+      <button onclick="uploadFolder()">Upload Folder</button>
+    </div>
+    <div class="hint">Select a whole folder. Supported files inside it will be parsed and ingested.</div>
+    <div class="status" id="folderStatus">No folder uploaded yet.</div>
+  </div>
+
+  <div class="card">
+    <label class="label">Output</label>
+    <pre id="output">Response will appear here...</pre>
+  </div>
+
+  <script>
+    const RECENT_SOURCE_LIMIT = 20;
+    let allSources = [];
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    async function parseApiResponse(res) {
+      const contentType = (res.headers.get("content-type") || "").toLowerCase();
+      const rawText = await res.text();
+
+      let data = null;
+      if (contentType.includes("application/json")) {
+        try {
+          data = rawText ? JSON.parse(rawText) : {};
+        } catch {
+          throw new Error(`API returned invalid JSON. HTTP ${res.status}. Body: ${rawText.slice(0, 300)}`);
+        }
+      }
+
+      if (!res.ok) {
+        if (data && data.error) {
+          const message = typeof data.error === "string"
+            ? data.error
+            : data.error.message || JSON.stringify(data.error);
+          throw new Error(`HTTP ${res.status}: ${message}`);
+        }
+
+        if (contentType.includes("text/html")) {
+          throw new Error(`HTTP ${res.status}: proxy/backend returned HTML instead of JSON`);
+        }
+
+        throw new Error(`HTTP ${res.status}: ${rawText.slice(0, 300) || "Unknown error"}`);
+      }
+
+      if (!contentType.includes("application/json")) {
+        throw new Error(`Expected JSON but got content-type: ${contentType || "unknown"}`);
+      }
+
+      return data;
+    }
+
+    function basename(path) {
+      if (!path) return "";
+      const parts = path.split("/");
+      return parts[parts.length - 1] || path;
+    }
+
+    function formatSourceLabel(item) {
+      const sourcePath = item.source_path || item.source_id || "";
+      const shortName = basename(sourcePath);
+
+      if (item.source_type === "upload") {
+        return `Upload: ${shortName}`;
+      }
+      if (item.source_type === "git") {
+        return `Git: ${shortName}`;
+      }
+      if (item.source_type === "local") {
+        return `Local: ${shortName}`;
+      }
+      return shortName || item.source_id || "Unknown source";
+    }
+
+    function formatSourceMeta(item) {
+      const parts = [];
+
+      if (item.file_type) parts.push(item.file_type);
+      if (item.source_type) parts.push(item.source_type);
+      if (typeof item.chunk_count === "number") parts.push(`${item.chunk_count} chunks`);
+
+      return parts.join(" | ");
+    }
+
+    function sortSourcesNewestFirst(items) {
+      return [...items].sort((a, b) => {
+        const aTime = new Date(a.last_ingested_at || 0).getTime();
+        const bTime = new Date(b.last_ingested_at || 0).getTime();
+        return bTime - aTime;
+      });
+    }
+
+    function filterSources(items) {
+      const search = document.getElementById("sourceSearch").value.trim().toLowerCase();
+      const typeFilter = document.getElementById("sourceTypeFilter").value.trim();
+      const showAll = document.getElementById("showAllSources").checked;
+
+      let filtered = sortSourcesNewestFirst(items);
+
+      if (typeFilter) {
+        filtered = filtered.filter(item => (item.source_type || "") === typeFilter);
+      }
+
+      if (search) {
+        filtered = filtered.filter(item => {
+          const haystack = [
+            item.source_path || "",
+            item.source_id || "",
+            item.file_type || "",
+            item.source_type || "",
+            formatSourceLabel(item)
+          ].join(" ").toLowerCase();
+
+          return haystack.includes(search);
+        });
+      }
+
+      if (!showAll && !search) {
+        filtered = filtered.slice(0, RECENT_SOURCE_LIMIT);
+      }
+
+      return filtered;
+    }
+
+    function renderSourceOptions() {
+      const select = document.getElementById("sourceSelect");
+      const summary = document.getElementById("sourceSummary");
+      const currentValue = select.value;
+
+      const filtered = filterSources(allSources);
+
+      const options = ['<option value="">All sources</option>'];
+
+      for (const item of filtered) {
+        const label = formatSourceLabel(item);
+        const meta = formatSourceMeta(item);
+        const fullLabel = meta ? `${label} (${meta})` : label;
+
+        options.push(
+          `<option value="${escapeHtml(item.source_id)}">${escapeHtml(fullLabel)}</option>`
+        );
+      }
+
+      select.innerHTML = options.join("");
+
+      if (currentValue && filtered.some(item => item.source_id === currentValue)) {
+        select.value = currentValue;
+      }
+
+      const total = allSources.length;
+      const shown = filtered.length;
+      const showAll = document.getElementById("showAllSources").checked;
+      const search = document.getElementById("sourceSearch").value.trim();
+      const typeFilter = document.getElementById("sourceTypeFilter").value.trim();
+
+      let mode = "";
+      if (search) {
+        mode = `Showing ${shown} matching source(s)`;
+      } else if (showAll) {
+        mode = `Showing all ${shown} source(s)`;
+      } else {
+        mode = `Showing ${shown} recent source(s) out of ${total}`;
+      }
+
+      if (typeFilter) {
+        mode += ` | filtered by type: ${typeFilter}`;
+      }
+
+      summary.textContent = total === 0 ? "No sources available yet." : mode;
+    }
+
+    function renderAskOutput(data) {
+      const output = document.getElementById("output");
+      const answer = data.answer || "";
+      const citations = Array.isArray(data.citations) ? data.citations : [];
+
+      let citationsHtml = "<div class='output-citations'>No citations returned.</div>";
+      if (citations.length > 0) {
+        citationsHtml = `<div class="output-citations">${escapeHtml(JSON.stringify(citations, null, 2))}</div>`;
+      }
+
+      output.innerHTML = `
+<div class="output-section-title">Answer</div>
+<div class="output-answer">${escapeHtml(answer)}</div>
+
+<div class="output-section-title">Citations</div>
+${citationsHtml}
+`;
+    }
+
+    async function loadSources() {
+      const summary = document.getElementById("sourceSummary");
+      summary.textContent = "Loading sources...";
+
+      try {
+        const res = await fetch("/api/admin/sources?status=active&limit=1000");
+        const data = await parseApiResponse(res);
+        allSources = Array.isArray(data.sources) ? data.sources : [];
+        renderSourceOptions();
+      } catch (err) {
+        allSources = [];
+        renderSourceOptions();
+        summary.textContent = "Failed to load sources.";
+        console.error("Failed to load sources:", err);
+      }
+    }
+
+    async function askQuestion() {
+      const q = document.getElementById("question").value.trim();
+      const output = document.getElementById("output");
+      const sourceId = document.getElementById("sourceSelect").value.trim();
+      const pageStart = document.getElementById("pageStart").value.trim();
+      const pageEnd = document.getElementById("pageEnd").value.trim();
+
+      if (!q) {
+        output.textContent = "Please enter a question.";
+        return;
+      }
+
+      output.textContent = "Loading...";
+
+      try {
+        const params = new URLSearchParams();
+        params.set("q", q);
+
+        if (sourceId) {
+          params.set("source_id", sourceId);
+        }
+
+        if (pageStart) {
+          params.set("page_start", pageStart);
+        }
+
+        if (pageEnd) {
+          params.set("page_end", pageEnd);
+        }
+
+        const res = await fetch(`/api/ask?${params.toString()}`);
+        const data = await parseApiResponse(res);
+        renderAskOutput(data);
+      } catch (err) {
+        output.textContent = "Request failed: " + err.message;
+      }
+    }
+
+    async function uploadFile() {
+      const fileInput = document.getElementById("fileInput");
+      const uploadStatus = document.getElementById("uploadStatus");
+      const output = document.getElementById("output");
+
+      if (!fileInput.files || fileInput.files.length === 0) {
+        uploadStatus.textContent = "Please choose a file first.";
+        return;
+      }
+
+      const file = fileInput.files[0];
+      const formData = new FormData();
+      formData.append("file", file);
+
+      uploadStatus.textContent = `Uploading ${file.name}...`;
+      output.textContent = "Processing upload...";
+
+      try {
+        const res = await fetch("/api/upload", {
+          method: "POST",
+          body: formData
+        });
+        const data = await parseApiResponse(res);
+
+        uploadStatus.textContent = `Upload complete: ${file.name}`;
+        output.textContent = JSON.stringify(data, null, 2);
+        await loadSources();
+      } catch (err) {
+        uploadStatus.textContent = "Upload failed.";
+        output.textContent = "Upload request failed: " + err.message;
+      }
+    }
+
+    async function uploadFolder() {
+      const folderInput = document.getElementById("folderInput");
+      const folderStatus = document.getElementById("folderStatus");
+      const output = document.getElementById("output");
+
+      if (!folderInput.files || folderInput.files.length === 0) {
+        folderStatus.textContent = "Please choose a folder first.";
+        return;
+      }
+
+      const files = Array.from(folderInput.files);
+      const firstName = files[0].webkitRelativePath || files[0].name;
+      const folderName = firstName.split("/")[0] || "folder_upload";
+
+      const formData = new FormData();
+      formData.append("folder_name", folderName);
+
+      for (const file of files) {
+        const relativeName = file.webkitRelativePath || file.name;
+        formData.append("files", file, relativeName);
+      }
+
+      folderStatus.textContent = `Uploading folder ${folderName} with ${files.length} files...`;
+      output.textContent = "Processing folder upload...";
+
+      try {
+        const res = await fetch("/api/upload-folder", {
+          method: "POST",
+          body: formData
+        });
+        const data = await parseApiResponse(res);
+
+        folderStatus.textContent = `Folder upload complete: ${folderName} (${files.length} files)`;
+        output.textContent = JSON.stringify(data, null, 2);
+        await loadSources();
+      } catch (err) {
+        folderStatus.textContent = "Folder upload failed.";
+        output.textContent = "Folder upload request failed: " + err.message;
+      }
+    }
+
+    loadSources();
+  </script>
+</body>
+</html>

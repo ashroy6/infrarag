@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from app.context_utils import build_citations, build_context_text, compact_chunks
+from app.llm_client import generate_text
+from app.prompts import NORMAL_QA_PROMPT
+from app.response_formatter import no_evidence_response
+from app.retrieve import retrieve_context
+
+MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "0.35"))
+NORMAL_QA_LIMIT = int(os.getenv("NORMAL_QA_LIMIT", "6"))
+NORMAL_QA_NUM_PREDICT = int(os.getenv("NORMAL_QA_NUM_PREDICT", "500"))
+
+
+def run(
+    question: str,
+    chat_context: str = "",
+    source_id: str | None = None,
+    source: str | None = None,
+    source_type: str | None = None,
+    file_type: str | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
+) -> dict[str, Any]:
+    chunks = retrieve_context(
+        question,
+        limit=NORMAL_QA_LIMIT,
+        source_id=source_id,
+        source=source,
+        source_type=source_type,
+        file_type=file_type,
+        page_start=page_start,
+        page_end=page_end,
+    )
+
+    if not chunks:
+        return no_evidence_response()
+
+    top_score = max(float(c.get("score", 0.0) or 0.0) for c in chunks)
+    if top_score < MIN_SCORE_THRESHOLD:
+        return no_evidence_response()
+
+    compacted = compact_chunks(chunks, max_total_chars=7000)
+    context_text = build_context_text(compacted)
+
+    prompt = NORMAL_QA_PROMPT.format(
+        question=question,
+        context_text=context_text,
+    )
+
+    answer = generate_text(
+        prompt,
+        temperature=0.0,
+        num_predict=NORMAL_QA_NUM_PREDICT,
+    )
+
+    return {
+        "answer": answer,
+        "citations": build_citations(compacted),
+    }

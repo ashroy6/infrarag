@@ -220,43 +220,6 @@ def _scroll_source_point_ids(client: QdrantClient, source_id: str) -> list[Any]:
     return point_ids
 
 
-
-def get_chunk_by_source_id_and_index(source_id: str, chunk_index: int) -> dict[str, Any] | None:
-    """
-    Return one exact chunk from Qdrant by source_id + chunk_index.
-
-    Used by clickable citations in the frontend evidence modal.
-    """
-    client = get_client()
-
-    if not collection_exists(client):
-        logger.info("Qdrant collection '%s' does not exist yet; returning no chunk", QDRANT_COLLECTION)
-        return None
-
-    points, _ = client.scroll(
-        collection_name=QDRANT_COLLECTION,
-        scroll_filter=Filter(
-            must=[
-                FieldCondition(
-                    key="source_id",
-                    match=MatchValue(value=source_id),
-                ),
-                FieldCondition(
-                    key="chunk_index",
-                    match=MatchValue(value=chunk_index),
-                ),
-            ]
-        ),
-        limit=1,
-        with_payload=True,
-        with_vectors=False,
-    )
-
-    if not points:
-        return None
-
-    return _payload_to_hit(points[0])
-
 def delete_points_by_source_id(source_id: str) -> None:
     client = get_client()
 

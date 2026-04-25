@@ -64,45 +64,57 @@ def _build_filter(
     conditions: list[FieldCondition] = []
 
     if source_id:
-        conditions.append(FieldCondition(key="source_id", match=MatchValue(value=source_id)))
+        conditions.append(
+            FieldCondition(
+                key="source_id",
+                match=MatchValue(value=source_id),
+            )
+        )
 
     if source:
-        conditions.append(FieldCondition(key="source", match=MatchValue(value=source)))
+        conditions.append(
+            FieldCondition(
+                key="source",
+                match=MatchValue(value=source),
+            )
+        )
 
     if source_type:
-        conditions.append(FieldCondition(key="source_type", match=MatchValue(value=source_type)))
+        conditions.append(
+            FieldCondition(
+                key="source_type",
+                match=MatchValue(value=source_type),
+            )
+        )
 
     if file_type:
-        conditions.append(FieldCondition(key="file_type", match=MatchValue(value=file_type)))
+        conditions.append(
+            FieldCondition(
+                key="file_type",
+                match=MatchValue(value=file_type),
+            )
+        )
 
     if page_start is not None:
-        conditions.append(FieldCondition(key="page_number", range=Range(gte=page_start)))
+        conditions.append(
+            FieldCondition(
+                key="page_number",
+                range=Range(gte=page_start),
+            )
+        )
 
     if page_end is not None:
-        conditions.append(FieldCondition(key="page_number", range=Range(lte=page_end)))
+        conditions.append(
+            FieldCondition(
+                key="page_number",
+                range=Range(lte=page_end),
+            )
+        )
 
     if not conditions:
         return None
 
     return Filter(must=conditions)
-
-
-def _payload_to_hit(item: Any) -> dict[str, Any]:
-    payload = item.payload or {}
-
-    return {
-        "score": getattr(item, "score", 1.0) or 1.0,
-        "source": payload.get("source", "unknown"),
-        "source_id": payload.get("source_id", ""),
-        "chunk_index": payload.get("chunk_index", -1),
-        "text": payload.get("text", ""),
-        "file_type": payload.get("file_type", ""),
-        "source_type": payload.get("source_type", ""),
-        "parser_type": payload.get("parser_type", ""),
-        "page_number": payload.get("page_number"),
-        "page_start": payload.get("page_start"),
-        "page_end": payload.get("page_end"),
-    }
 
 
 def search(
@@ -139,54 +151,24 @@ def search(
 
     hits: list[dict[str, Any]] = []
     for item in response.points:
-        hits.append(_payload_to_hit(item))
-
-    return hits
-
-
-def get_chunks_by_source_id(source_id: str) -> list[dict[str, Any]]:
-    """
-    Loads all chunk payloads for a source from Qdrant.
-
-    Used by full document/book summarisation.
-    This reads the actual full chunk text from Qdrant payload, not only SQLite previews.
-    """
-    client = get_client()
-
-    if not collection_exists(client):
-        logger.info("Qdrant collection '%s' does not exist yet; returning no chunks", QDRANT_COLLECTION)
-        return []
-
-    chunks: list[dict[str, Any]] = []
-    offset = None
-
-    while True:
-        points, next_offset = client.scroll(
-            collection_name=QDRANT_COLLECTION,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="source_id",
-                        match=MatchValue(value=source_id),
-                    )
-                ]
-            ),
-            limit=_SCROLL_BATCH_SIZE,
-            offset=offset,
-            with_payload=True,
-            with_vectors=False,
+        payload = item.payload or {}
+        hits.append(
+            {
+                "score": item.score,
+                "source": payload.get("source", "unknown"),
+                "source_id": payload.get("source_id", ""),
+                "chunk_index": payload.get("chunk_index", -1),
+                "text": payload.get("text", ""),
+                "file_type": payload.get("file_type", ""),
+                "source_type": payload.get("source_type", ""),
+                "parser_type": payload.get("parser_type", ""),
+                "page_number": payload.get("page_number"),
+                "page_start": payload.get("page_start"),
+                "page_end": payload.get("page_end"),
+            }
         )
 
-        for point in points:
-            chunks.append(_payload_to_hit(point))
-
-        if next_offset is None:
-            break
-
-        offset = next_offset
-
-    chunks.sort(key=lambda item: int(item.get("chunk_index", 0)))
-    return chunks
+    return hits
 
 
 def _scroll_source_point_ids(client: QdrantClient, source_id: str) -> list[Any]:
@@ -219,43 +201,6 @@ def _scroll_source_point_ids(client: QdrantClient, source_id: str) -> list[Any]:
 
     return point_ids
 
-
-
-def get_chunk_by_source_id_and_index(source_id: str, chunk_index: int) -> dict[str, Any] | None:
-    """
-    Return one exact chunk from Qdrant by source_id + chunk_index.
-
-    Used by clickable citations in the frontend evidence modal.
-    """
-    client = get_client()
-
-    if not collection_exists(client):
-        logger.info("Qdrant collection '%s' does not exist yet; returning no chunk", QDRANT_COLLECTION)
-        return None
-
-    points, _ = client.scroll(
-        collection_name=QDRANT_COLLECTION,
-        scroll_filter=Filter(
-            must=[
-                FieldCondition(
-                    key="source_id",
-                    match=MatchValue(value=source_id),
-                ),
-                FieldCondition(
-                    key="chunk_index",
-                    match=MatchValue(value=chunk_index),
-                ),
-            ]
-        ),
-        limit=1,
-        with_payload=True,
-        with_vectors=False,
-    )
-
-    if not points:
-        return None
-
-    return _payload_to_hit(points[0])
 
 def delete_points_by_source_id(source_id: str) -> None:
     client = get_client()
