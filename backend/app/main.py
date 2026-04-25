@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 import re
 import sqlite3
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 import requests
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from app.git_connector import clone_or_pull_repo
@@ -18,6 +19,8 @@ from app.pipeline import ingest_paths
 from app.qdrant_client import delete_points_by_source_id
 from app.retrieve import retrieve_context
 from app.uploads import save_upload, save_uploads
+from app.summary_jobs import get_summary_job
+from app.streaming_orchestrator import stream_ask_events
 from app.chat_history import delete_conversation, get_messages, list_conversations, rename_conversation
 from app.rag_orchestrator import run_ask
 from app.qdrant_client import get_chunk_by_source_id_and_index
@@ -404,6 +407,48 @@ def api_delete_conversation(conversation_id: str):
     return {"message": "Conversation deleted", "conversation_id": conversation_id}
 
 
+@app.get("/ask-stream")
+def ask_stream(
+    q: str = "",
+    conversation_id: str | None = None,
+    source_id: str | None = None,
+    source: str | None = None,
+    source_type: str | None = None,
+    file_type: str | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
+):
+    if not q:
+        raise InfraRAGError("query parameter 'q' is required", status_code=400, code="missing_query")
+
+    return StreamingResponse(
+        stream_ask_events(
+            question=q,
+            conversation_id=conversation_id,
+            source_id=source_id,
+            source=source,
+            source_type=source_type,
+            file_type=file_type,
+            page_start=page_start,
+            page_end=page_end,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/summary-jobs/{job_id}")
+def api_get_summary_job(job_id: str):
+    job = get_summary_job(job_id)
+    if not job:
+        raise InfraRAGError("Summary job not found", status_code=404, code="summary_job_not_found")
+
+    return {"job": job}
+
+
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
     saved_path = await save_upload(file)
@@ -585,6 +630,26 @@ def admin_delete_source(source_id: str):
         "source_id": source_id,
         "source_path": record["source_path"],
     }
+
+
+@app.get("/audits")
+def api_list_audits(limit: int = 100):
+    metadata_db = MetadataDB()
+    return {"audits": metadata_db.list_audit_logs(limit=limit)}
+
+
+@app.get("/audits/export")
+def api_export_audits(limit: int = 500):
+    metadata_db = MetadataDB()
+    audits = metadata_db.list_audit_logs(limit=limit)
+
+    return JSONResponse(
+        content={
+            "export_type": "infrarag_audit_logs",
+            "count": len(audits),
+            "audits": audits,
+        }
+    )
 
 
 @app.get("/metrics")

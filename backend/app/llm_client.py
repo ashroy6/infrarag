@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
-from typing import Any
+from typing import Any, Iterator
 
 import requests
 
@@ -54,5 +55,58 @@ def generate_text(
     except ValueError as exc:
         raise LLMError("Failed to parse Ollama JSON response") from exc
 
-    answer = (data.get("response") or "").strip()
-    return answer
+    return (data.get("response") or "").strip()
+
+
+def stream_generate_text(
+    prompt: str,
+    model: str | None = None,
+    temperature: float = 0.0,
+    num_predict: int = 512,
+    timeout: int | None = None,
+) -> Iterator[str]:
+    """
+    Streams Ollama tokens/chunks.
+
+    Yields text fragments as they arrive.
+    """
+    selected_model = model or CHAT_MODEL
+
+    try:
+        with requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={
+                "model": selected_model,
+                "prompt": prompt,
+                "stream": True,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": num_predict,
+                },
+            },
+            timeout=timeout or OLLAMA_TIMEOUT_SECONDS,
+            stream=True,
+        ) as response:
+            if response.status_code >= 400:
+                raise LLMError(f"Ollama returned HTTP {response.status_code}: {response.text[:500]}")
+
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+
+                try:
+                    data = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+
+                token = data.get("response")
+                if token:
+                    yield token
+
+                if data.get("done") is True:
+                    break
+
+    except requests.Timeout as exc:
+        raise LLMError("Ollama streaming request timed out") from exc
+    except requests.RequestException as exc:
+        raise LLMError(f"Ollama streaming request failed: {exc}") from exc

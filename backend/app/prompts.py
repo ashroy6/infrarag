@@ -48,6 +48,9 @@ Rules:
 - Use only the retrieved evidence.
 - Do not repeat the evidence block.
 - Keep the answer practical.
+- If the question asks for an address, registered office, company number, contact, or location, extract the exact value from context.
+- If multiple companies or addresses are present, list all clearly supported addresses and label the company names.
+- Do not return only the first address if the context clearly contains more than one relevant address.
 
 Question:
 {question}

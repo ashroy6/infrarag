@@ -985,6 +985,111 @@
       }
     }
 
+    function updateLastAssistant(content, extra = {}) {
+      const last = messages[messages.length - 1];
+      if (!last || last.role !== "assistant") return;
+
+      if (typeof content === "string") {
+        last.content = content;
+      }
+
+      if (extra.citations) {
+        last.citations = extra.citations;
+      }
+
+      if (extra.meta) {
+        last.meta = { ...(last.meta || {}), ...extra.meta };
+      }
+
+      renderMessages();
+    }
+
+    function parseSseChunk(buffer, onEvent) {
+      const events = buffer.split("\n\n");
+      const remainder = events.pop() || "";
+
+      for (const eventBlock of events) {
+        const lines = eventBlock.split("\n");
+        let eventName = "message";
+        const dataLines = [];
+
+        for (const line of lines) {
+          if (line.startsWith("event:")) {
+            eventName = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            // Keep JSON payload intact. Remove only one optional leading space after "data:".
+            dataLines.push(line.slice(5).replace(/^ /, ""));
+          }
+        }
+
+        if (!dataLines.length) continue;
+
+        try {
+          onEvent(eventName, JSON.parse(dataLines.join("\n")));
+        } catch (err) {
+          console.error("Failed to parse SSE event", eventName, err);
+        }
+      }
+
+      return remainder;
+    }
+
+    async function pollSummaryJob(jobId) {
+      let finished = false;
+
+      while (!finished) {
+        await new Promise(resolve => setTimeout(resolve, 2500));
+
+        const res = await fetch(`/api/summary-jobs/${encodeURIComponent(jobId)}`);
+        const data = await parseApiResponse(res);
+        const job = data.job || {};
+
+        const current = job.progress_current ?? 0;
+        const total = job.progress_total ?? 0;
+        const status = job.status || "unknown";
+
+        if (status === "queued" || status === "running") {
+          updateLastAssistant(
+            `Document summary is running...\nProgress: ${current}/${total || "?"}`
+          );
+          continue;
+        }
+
+        if (status === "done") {
+          finished = true;
+          updateLastAssistant(job.answer || "No evidence found in the knowledge base.", {
+            citations: Array.isArray(job.citations) ? job.citations : [],
+            meta: {
+              pipeline_label: "Full document/book summarisation",
+              pipeline_used: "document_summary",
+              intent_confidence: "",
+              intent_reason: "Background document summary completed.",
+              router: "background",
+              latency_ms: "",
+            }
+          });
+          await loadConversations();
+          break;
+        }
+
+        if (status === "failed") {
+          finished = true;
+          updateLastAssistant(`Document summary failed: ${job.error || "unknown error"}`);
+          break;
+        }
+      }
+    }
+
+    function finishAskButton() {
+      const input = document.getElementById("question");
+      const askButton = document.getElementById("askButton");
+
+      isAsking = false;
+      askButton.disabled = false;
+      askButton.textContent = "Ask";
+      input.focus();
+    }
+
     async function askQuestion() {
       const input = document.getElementById("question");
       const askButton = document.getElementById("askButton");
@@ -1002,44 +1107,114 @@
       input.value = "";
 
       addLocalMessage("user", q);
-      addLocalMessage("assistant", "Thinking...");
+      addLocalMessage("assistant", "Routing question...", {
+        citations: [],
+        meta: {
+          pipeline_label: "Routing...",
+          intent_confidence: "",
+          intent_reason: "Waiting for backend router.",
+          router: "",
+          latency_ms: "",
+        }
+      });
+
+      const params = new URLSearchParams();
+      params.set("q", q);
+
+      if (currentConversationId) params.set("conversation_id", currentConversationId);
+      if (sourceId) params.set("source_id", sourceId);
+      if (pageStart) params.set("page_start", pageStart);
+      if (pageEnd) params.set("page_end", pageEnd);
+
+      let answer = "";
+      let citations = [];
+      let meta = {};
+      let eventSource = null;
+      let closedNormally = false;
 
       try {
-        const params = new URLSearchParams();
-        params.set("q", q);
+        eventSource = new EventSource(`/api/ask-stream?${params.toString()}`);
 
-        if (currentConversationId) params.set("conversation_id", currentConversationId);
-        if (sourceId) params.set("source_id", sourceId);
-        if (pageStart) params.set("page_start", pageStart);
-        if (pageEnd) params.set("page_end", pageEnd);
+        eventSource.addEventListener("meta", event => {
+          const data = JSON.parse(event.data);
 
-        const res = await fetch(`/api/ask?${params.toString()}`);
-        const data = await parseApiResponse(res);
+          currentConversationId = data.conversation_id || currentConversationId;
 
-        currentConversationId = data.conversation_id || currentConversationId;
-
-        messages.pop();
-        addLocalMessage("assistant", data.answer || "", {
-          citations: Array.isArray(data.citations) ? data.citations : [],
-          meta: {
+          meta = {
             pipeline_used: data.pipeline_used,
             pipeline_label: data.pipeline_label || data.pipeline_used,
             intent_confidence: data.intent_confidence,
             intent_reason: data.intent_reason,
             router: data.router,
-            latency_ms: data.latency_ms,
+            latency_ms: "",
+          };
+
+          updateLastAssistant(answer || "Searching sources...", { meta, citations });
+        });
+
+        eventSource.addEventListener("citations", event => {
+          const data = JSON.parse(event.data);
+          citations = Array.isArray(data.citations) ? data.citations : [];
+          updateLastAssistant(answer || "Evidence found. Generating answer...", { meta, citations });
+        });
+
+        eventSource.addEventListener("token", event => {
+          const data = JSON.parse(event.data);
+          answer += data.token || "";
+          updateLastAssistant(answer || "Thinking...", { meta, citations });
+        });
+
+        eventSource.addEventListener("summary_job", event => {
+          const data = JSON.parse(event.data);
+
+          answer = data.message || "Document summary job started.";
+          updateLastAssistant(`${answer}\nProgress: 0/?`, { meta, citations: [] });
+
+          if (data.job_id) {
+            pollSummaryJob(data.job_id);
           }
         });
 
-        await loadConversations();
+        eventSource.addEventListener("done", async event => {
+          const data = JSON.parse(event.data);
+
+          closedNormally = true;
+
+          if (data.latency_ms !== undefined && data.latency_ms !== null) {
+            meta.latency_ms = data.latency_ms;
+          }
+
+          if (Array.isArray(data.citations)) {
+            citations = data.citations;
+          }
+
+          const finalAnswer = answer.trim()
+            ? answer
+            : "No answer text was generated. Evidence may have been retrieved, but the model returned an empty response.";
+
+          updateLastAssistant(finalAnswer, { meta, citations });
+
+          eventSource.close();
+          await loadConversations();
+          finishAskButton();
+        });
+
+        eventSource.addEventListener("error", event => {
+          if (closedNormally) return;
+
+          updateLastAssistant("Request failed: streaming connection error.", {
+            meta,
+            citations: [],
+          });
+
+          if (eventSource) eventSource.close();
+          finishAskButton();
+        });
+
       } catch (err) {
-        messages.pop();
-        addLocalMessage("assistant", "Request failed: " + err.message);
-      } finally {
-        isAsking = false;
-        askButton.disabled = false;
-        askButton.textContent = "Ask";
-        input.focus();
+        if (eventSource) eventSource.close();
+        updateLastAssistant("Request failed: " + err.message);
+        finishAskButton();
       }
     }
 
@@ -1130,6 +1305,67 @@
       }
     }
 
+    function cleanEvidenceText(raw) {
+      let text = String(raw || "");
+
+      // Normalize line endings.
+      text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+      // Convert common PDF separators into readable line breaks.
+      text = text.replace(/\s*\|\s*/g, "\n");
+
+      // Remove common PDF extraction artifacts.
+      text = text.replace(/^\s*page\s*$/gim, "");
+      text = text.replace(/^\s*\d+\s*$/gm, "");
+      text = text.replace(/^\s*[pa]\s*$/gim, "");
+
+      // Normalize bullet glyphs to simple bullets.
+      text = text.replace(/[•●▪◦]/g, "-");
+
+      // Trim and remove empty lines.
+      const rawLines = text
+        .split("\n")
+        .map(line => line.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+
+      const rebuilt = [];
+
+      for (const line of rawLines) {
+        const previous = rebuilt[rebuilt.length - 1];
+
+        const startsStructuredField =
+          /^(registered office|office address|company address|address|company number|registration number|registered in|email|phone|telephone|website)\s*:/i.test(line);
+
+        const looksLikeHeading =
+          line.length <= 90 &&
+          /^[A-Z][A-Za-z0-9&/() ,.'’\-]+:?$/.test(line) &&
+          line.split(/\s+/).length <= 8;
+
+        const previousLooksOpen =
+          previous &&
+          !/[.!?:;]$/.test(previous) &&
+          !/^(registered office|office address|company address|address|company number|registration number|registered in|email|phone|telephone|website)\s*:/i.test(previous);
+
+        if (previousLooksOpen && !startsStructuredField && !looksLikeHeading) {
+          rebuilt[rebuilt.length - 1] = `${previous} ${line}`;
+        } else {
+          rebuilt.push(line);
+        }
+      }
+
+      text = rebuilt.join("\n");
+
+      // Add spacing before common structured fields.
+      text = text.replace(/\n?(Registered office|Office address|Company address|Address):/gi, "\n$1:");
+      text = text.replace(/\n?(Company number|Registration number):/gi, "\n$1:");
+      text = text.replace(/\n?(Registered in [^\n]+)/gi, "\n$1");
+
+      // Collapse excessive blank lines.
+      text = text.replace(/\n{3,}/g, "\n\n").trim();
+
+      return text || "No chunk text found.";
+    }
+
     async function openCitation(sourceId, chunkIndex) {
       if (!sourceId || chunkIndex < 0) return;
 
@@ -1158,7 +1394,7 @@
             ${c.file_type ? `<div><strong>File type:</strong> ${escapeHtml(c.file_type)}</div>` : ""}
             ${c.source_type ? `<div><strong>Source type:</strong> ${escapeHtml(c.source_type)}</div>` : ""}
           </div>
-          <div class="evidence-text">${escapeHtml(c.text || "No chunk text found.")}</div>
+          <div class="evidence-text">${escapeHtml(cleanEvidenceText(c.text || ""))}</div>
         `;
       } catch (err) {
         body.innerHTML = `<div class="evidence-text">Failed to load citation: ${escapeHtml(err.message)}</div>`;

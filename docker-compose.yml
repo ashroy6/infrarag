@@ -28,6 +28,7 @@ services:
       - ./backend:/app
       - ./docs:/docs
       - backend_data:/app/data
+      - hf_cache:/root/.cache/huggingface
     environment:
       OLLAMA_BASE_URL: http://ollama:11434
       QDRANT_HOST: qdrant
@@ -38,6 +39,16 @@ services:
       METADATA_DB_PATH: /app/data/infrarag.db
       UPLOAD_DIR: /app/data/uploads
       REPOS_DIR: /app/data/repos
+      HF_HOME: /root/.cache/huggingface
+      TRANSFORMERS_CACHE: /root/.cache/huggingface
+      NORMAL_QA_LIMIT: 6
+      LONG_EXPLANATION_LIMIT: 10
+      REPO_EXPLANATION_LIMIT: 10
+      INCIDENT_RUNBOOK_LIMIT: 8
+      RERANKER_ENABLED: "true"
+      RERANKER_MODEL: BAAI/bge-reranker-base
+      RERANKER_BATCH_SIZE: 8
+      RERANKER_MAX_TEXT_CHARS: 1800
     depends_on:
       - ollama
       - qdrant
@@ -88,3 +99,4 @@ volumes:
   qdrant_data:
   grafana_data:
   backend_data:
+  hf_cache:

@@ -106,16 +106,16 @@ def rule_based_intent(question: str) -> dict[str, Any] | None:
         )
 
     if re.search(
-        r"\b(error|incident|alert|outage|latency|timeout|crashing|crashloop|pod|failed|failure|down|unhealthy|rollback|what should i check|troubleshoot)\b",
+        r"\b(address|registered office|office address|company address|postcode|post code|company number|contact address|where is it registered|registered in england)\b",
         q,
     ):
         return _with_label(
             {
-                "intent": "incident_runbook",
-                "answer_length": "medium",
+                "intent": "normal_qa",
+                "answer_length": "short",
                 "needs_all_chunks": False,
-                "confidence": 0.88,
-                "reason": "User appears to be troubleshooting an operational issue.",
+                "confidence": 0.90,
+                "reason": "User asked for address or company registration information.",
             },
             "rules",
         )
