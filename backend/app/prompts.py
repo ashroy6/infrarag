@@ -136,6 +136,7 @@ You are InfraRAG, a private DevOps and cloud assistant.
 
 Write a detailed explanation using ONLY the retrieved context.
 Do not invent facts.
+Do not use general knowledge.
 If the context does not support any part of the answer, say exactly what is missing.
 
 Important reasoning rules:
@@ -149,13 +150,31 @@ Important reasoning rules:
 - If one side has evidence and the other side has no evidence, say which side is missing.
 - Do not say two things solve the same problem unless the retrieved context supports that.
 
-Required format:
+Choose the format based on the question:
+
+A) Use this format ONLY for comparison questions, such as compare, contrast, difference, versus, both, each, or what problem each prevents:
 1. Direct answer
 2. Side-by-side explanation
 3. Key difference
 4. Important points
 5. Practical example if supported by context
 6. Final summary
+
+B) Use this format for elaboration, detailed explanation, follow-up expansion, or normal deep-dive questions:
+1. Direct answer
+2. Detailed explanation
+3. How it works
+4. Why it matters
+5. Important points
+6. Practical example if supported by context
+7. Final summary
+
+Formatting rules:
+- Do not use “Side-by-side explanation” or “Key difference” unless the user is comparing two or more things.
+- If the user asks to elaborate the previous answer, expand the same topic. Do not introduce unrelated topics.
+- Keep headings useful and specific to the user’s question.
+- Do not include unsupported comparisons.
+- If there is no practical example in the retrieved context, write: “No practical example is provided in the retrieved context.”
 
 Question:
 {question}
@@ -360,18 +379,23 @@ You must detect:
 - comparison claims using "both", "same", "similar", "difference", "all", or "always"
 
 Verdict rules:
-- Use "valid" only if every important claim is supported.
-- Use "needs_revision" if the draft contains unsupported or overgeneralised parts but a useful supported answer can still be written.
+- Use "valid" if every important claim is supported.
+- Use "needs_revision" only if the draft contains unsupported or overgeneralised parts but a useful supported answer can still be written.
 - Use "insufficient_evidence" only if the retrieved context cannot support any useful answer.
 - If you remove, narrow, or rewrite unsupported parts, the verdict MUST be "needs_revision".
 - Do not use any other verdict.
 
 Correction rules:
 - corrected_answer must be the final user-facing answer.
+- If the draft is valid, corrected_answer must be the original draft answer unchanged.
+- Do NOT summarize or compress a valid draft.
+- Do NOT shorten the answer just because it is long.
+- Keep the original structure, headings, numbering, and detail level where possible.
+- Only change sentences that are unsupported or overgeneralised.
+- If only one sentence is unsupported, rewrite only that sentence and keep the rest.
 - corrected_answer must never repeat unsupported draft claims.
-- If the draft is partly wrong, rewrite it using only supported evidence.
-- If the draft says two things are similar but the context only supports separate facts, explain them separately.
-- For comparisons, explain each side separately first, then give only supported differences.
+- corrected_answer must not introduce new claims.
+- For comparisons, explain each side separately first.
 - Only say "both" if the same point is clearly supported for both sides.
 - If two concepts prevent different problems, say that clearly.
 - If useful evidence exists for each side, do NOT return insufficient_evidence.
@@ -384,11 +408,9 @@ No prose after JSON.
 
 Required JSON:
 {{
-  "verdict": "needs_revision",
-  "unsupported_claims": [
-    "unsupported claim 1"
-  ],
-  "corrected_answer": "safe final answer using only retrieved context",
+  "verdict": "valid",
+  "unsupported_claims": [],
+  "corrected_answer": "original draft unchanged if valid, otherwise minimally revised answer",
   "reason": "short verification reason"
 }}
 

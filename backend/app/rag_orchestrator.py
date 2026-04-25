@@ -13,6 +13,7 @@ from app.chat_history import (
     get_recent_chat_context,
 )
 from app.llm_client import CHAT_MODEL
+from app.followup_resolver import resolve_followup_question
 from app.router import decide_intent
 
 from app.pipelines import document_summary
@@ -80,12 +81,21 @@ def run_ask(
     add_user_message(resolved_conversation_id, normalized_question)
 
     chat_context = get_recent_chat_context(resolved_conversation_id, limit=10)
-    routing = decide_intent(normalized_question, chat_context=chat_context)
+
+    followup = resolve_followup_question(normalized_question, chat_context)
+    effective_question = followup.get("resolved_question") or normalized_question
+
+    routing = decide_intent(effective_question, chat_context=chat_context)
+    routing["original_question"] = normalized_question
+    routing["resolved_question"] = effective_question
+    routing["is_followup"] = followup.get("is_followup", False)
+    routing["followup_reason"] = followup.get("reason", "")
+
     selected_pipeline = routing.get("pipeline_used", "normal_qa")
 
     result = _run_selected_pipeline(
         pipeline_used=selected_pipeline,
-        question=normalized_question,
+        question=effective_question,
         chat_context=chat_context,
         source_id=source_id,
         source=source,
@@ -120,7 +130,14 @@ def run_ask(
             context_text=result.get("verification_context_text", ""),
             draft_answer=answer,
         )
-        answer = verification_result.get("corrected_answer", answer)
+
+        verifier_verdict = verification_result.get("verification_verdict")
+
+        # Important:
+        # If verifier says the draft is valid, keep the original detailed draft.
+        # Only replace the answer when verifier says revision/insufficient evidence.
+        if verifier_verdict in {"needs_revision", "insufficient_evidence"}:
+            answer = verification_result.get("corrected_answer", answer)
 
         if answer.strip() == "No evidence found in the knowledge base.":
             citations = []
@@ -147,6 +164,9 @@ def run_ask(
 
     response: dict[str, Any] = {
         "question": normalized_question,
+        "resolved_question": effective_question,
+        "is_followup": followup.get("is_followup", False),
+        "followup_reason": followup.get("reason", ""),
         "answer": answer,
         "citations": citations,
         "conversation_id": resolved_conversation_id,

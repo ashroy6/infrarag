@@ -920,8 +920,6 @@
     let activeEventSource = null;
     let activeRequestId = null;
     let stopRequested = false;
-    let activeLatencyTimer = null;
-    let activeLatencyStartedAt = null;
 
     function applySidebarState() {
       const app = document.querySelector(".app");
@@ -1139,7 +1137,7 @@
                   <div><strong>Planner confidence:</strong> ${escapeHtml(meta.intent_confidence ?? "n/a")}</div>
                   <div><strong>Router:</strong> ${escapeHtml(meta.router ?? "n/a")}</div>
                   <div><strong>Verifier:</strong> ${escapeHtml(meta.verification_verdict ?? "n/a")}</div>
-                  <div><strong>Latency:</strong> ${escapeHtml(meta.latency_display || (meta.latency_ms ? `${Math.round(Number(meta.latency_ms) / 1000)}s` : "n/a"))}</div>
+                  <div><strong>Latency:</strong> ${escapeHtml(meta.latency_ms ? `${meta.latency_ms} ms` : "n/a")}</div>
                 </div>
                 <div style="margin-top:6px;"><strong>Reason:</strong> ${escapeHtml(meta.intent_reason || "n/a")}</div>
               </div>
@@ -1428,54 +1426,6 @@
       }
     }
 
-    function formatLatencySeconds(ms) {
-      const seconds = Math.max(0, Math.round(Number(ms || 0) / 1000));
-      return `${seconds}s`;
-    }
-
-    function stopLatencyTimer(finalLatencyMs = null) {
-      if (activeLatencyTimer) {
-        clearInterval(activeLatencyTimer);
-        activeLatencyTimer = null;
-      }
-
-      if (finalLatencyMs !== null && finalLatencyMs !== undefined) {
-        const last = messages[messages.length - 1];
-        if (last && last.role === "assistant") {
-          last.meta = {
-            ...(last.meta || {}),
-            latency_ms: finalLatencyMs,
-            latency_display: formatLatencySeconds(finalLatencyMs),
-          };
-          renderMessages();
-        }
-      }
-
-      activeLatencyStartedAt = null;
-    }
-
-    function startLatencyTimer() {
-      stopLatencyTimer();
-
-      activeLatencyStartedAt = Date.now();
-
-      activeLatencyTimer = setInterval(() => {
-        if (!activeLatencyStartedAt || !isAsking) return;
-
-        const elapsedMs = Date.now() - activeLatencyStartedAt;
-        const last = messages[messages.length - 1];
-
-        if (!last || last.role !== "assistant") return;
-
-        last.meta = {
-          ...(last.meta || {}),
-          latency_display: formatLatencySeconds(elapsedMs),
-        };
-
-        renderMessages();
-      }, 1000);
-    }
-
     function finishAskButton() {
       const input = document.getElementById("question");
       const askButton = document.getElementById("askButton");
@@ -1550,7 +1500,6 @@
         renderMessages();
       }
 
-      stopLatencyTimer();
       finishAskButton();
     }
 
@@ -1566,7 +1515,6 @@
       if (!q || isAsking) return;
 
       startAskButton();
-      startLatencyTimer();
       input.value = "";
 
       addLocalMessage("user", q);
@@ -1578,7 +1526,6 @@
           intent_reason: "Waiting for backend router.",
           router: "",
           latency_ms: "",
-          latency_display: "0s",
           verification_verdict: "n/a",
           progress: 5,
           progress_label: "Starting...",
@@ -1624,7 +1571,6 @@
             intent_reason: data.intent_reason,
             router: data.router,
             latency_ms: "",
-            latency_display: meta.latency_display || "0s",
             verification_verdict: data.verification_verdict || "pending",
             progress: data.progress ?? 15,
             progress_label: data.progress_label || "Searching evidence.",
@@ -1703,7 +1649,6 @@
           updateLastAssistant(finalText, { meta, citations });
 
           if (eventSource) eventSource.close();
-          stopLatencyTimer(data.latency_ms ?? null);
           finishAskButton();
         });
 
@@ -1714,10 +1659,6 @@
 
           if (data.latency_ms !== undefined && data.latency_ms !== null) {
             meta.latency_ms = data.latency_ms;
-            meta.latency_display = formatLatencySeconds(data.latency_ms);
-            stopLatencyTimer(data.latency_ms);
-          } else {
-            stopLatencyTimer();
           }
 
           if (Array.isArray(data.citations)) {
@@ -1774,7 +1715,6 @@
 
           if (eventSource) eventSource.close();
           activeEventSource = null;
-          stopLatencyTimer();
           finishAskButton();
         });
 
@@ -1786,7 +1726,6 @@
           updateLastAssistant("Request failed: " + err.message);
         }
 
-        stopLatencyTimer();
         finishAskButton();
       }
     }

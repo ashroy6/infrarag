@@ -259,6 +259,23 @@ def verify_answer(
         unsupported_claims=unsupported_clean,
     )
 
+    draft_len = len(draft_answer.strip())
+    corrected_len = len(corrected.strip())
+
+    # Guardrail:
+    # The verifier must not compress a detailed answer into a tiny summary unless it found concrete unsupported claims.
+    # If corrected answer is much shorter and unsupported_claims is empty, keep the original draft as valid.
+    if (
+        verdict in {"needs_revision", "insufficient_evidence"}
+        and not unsupported_clean
+        and draft_len >= 500
+        and corrected_len < int(draft_len * 0.65)
+    ):
+        verdict = "valid"
+        corrected = draft_answer
+
+    # Guardrail:
+    # If verifier says revision is needed but gives back the same unsafe draft, replace with a safe fallback.
     if verdict in {"needs_revision", "insufficient_evidence"} and corrected.strip() == draft_answer.strip():
         if verdict == "insufficient_evidence":
             corrected = (

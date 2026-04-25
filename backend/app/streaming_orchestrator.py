@@ -16,6 +16,7 @@ from app.chat_history import (
     get_recent_chat_context,
 )
 from app.context_utils import build_citations, build_context_text, compact_chunks
+from app.followup_resolver import resolve_followup_question
 from app.llm_client import CHAT_MODEL, LLMCancelled, stream_generate_text
 from app.prompts import (
     INCIDENT_RUNBOOK_PROMPT,
@@ -141,7 +142,16 @@ def stream_ask_events(
             return
 
         chat_context = get_recent_chat_context(resolved_conversation_id, limit=10)
-        routing = decide_intent(normalized_question, chat_context=chat_context)
+
+        followup = resolve_followup_question(normalized_question, chat_context)
+        effective_question = followup.get("resolved_question") or normalized_question
+
+        routing = decide_intent(effective_question, chat_context=chat_context)
+        routing["original_question"] = normalized_question
+        routing["resolved_question"] = effective_question
+        routing["is_followup"] = followup.get("is_followup", False)
+        routing["followup_reason"] = followup.get("reason", "")
+
         pipeline_used = routing.get("pipeline_used", "normal_qa")
         retrieval_plan = routing.get("planner") or routing
 
@@ -154,6 +164,9 @@ def stream_ask_events(
             {
                 "request_id": request_id,
                 "question": normalized_question,
+                "resolved_question": effective_question,
+                "is_followup": followup.get("is_followup", False),
+                "followup_reason": followup.get("reason", ""),
                 "conversation_id": resolved_conversation_id,
                 "pipeline_used": pipeline_used,
                 "pipeline_label": routing.get("pipeline_label"),
@@ -175,7 +188,7 @@ def stream_ask_events(
                 return
 
             job_id = start_document_summary_job(
-                question=normalized_question,
+                question=effective_question,
                 conversation_id=resolved_conversation_id,
                 routing=routing,
                 source_id=source_id,
@@ -204,7 +217,7 @@ def stream_ask_events(
             return
 
         chunks = retrieve_context(
-            normalized_question,
+            effective_question,
             limit=retrieval_limit,
             source_id=source_id,
             source=source,
@@ -248,7 +261,7 @@ def stream_ask_events(
 
         prompt = _build_prompt(
             pipeline_used=pipeline_used,
-            question=normalized_question,
+            question=effective_question,
             chat_context=chat_context,
             context_text=context_text,
         )
@@ -311,7 +324,7 @@ def stream_ask_events(
 
             try:
                 verification_result = verify_answer(
-                    question=normalized_question,
+                    question=effective_question,
                     pipeline_used=pipeline_used,
                     context_text=context_text,
                     draft_answer=answer,
@@ -325,9 +338,15 @@ def stream_ask_events(
                 yield _sse("cancelled", cancel_payload("after_verification"))
                 return
 
-            corrected_answer = verification_result.get("corrected_answer", answer)
-            if corrected_answer.strip():
-                answer = corrected_answer
+            verifier_verdict = verification_result.get("verification_verdict")
+
+            # Important:
+            # If verifier says the draft is valid, keep the original detailed draft.
+            # Only replace the answer when the verifier actually says revision/insufficient evidence.
+            if verifier_verdict in {"needs_revision", "insufficient_evidence"}:
+                corrected_answer = verification_result.get("corrected_answer", answer)
+                if corrected_answer.strip():
+                    answer = corrected_answer
 
             if answer.strip() == "No evidence found in the knowledge base.":
                 citations = []

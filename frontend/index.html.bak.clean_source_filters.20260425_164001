@@ -225,42 +225,6 @@
       margin-bottom: 0;
     }
 
-    .source-filter-row {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
-      gap: 10px;
-      align-items: center;
-      margin-bottom: 8px;
-    }
-
-    .source-filter-row input,
-    .source-filter-row select {
-      width: 100%;
-      min-width: 0;
-      flex: unset;
-    }
-
-    .source-filter-row .secondary-btn {
-      white-space: nowrap;
-      height: 42px;
-    }
-
-    @media (max-width: 1100px) {
-      .source-filter-row {
-        grid-template-columns: 1fr 1fr;
-      }
-
-      .source-filter-row .secondary-btn {
-        width: 100%;
-      }
-    }
-
-    @media (max-width: 700px) {
-      .source-filter-row {
-        grid-template-columns: 1fr;
-      }
-    }
-
     input[type="text"],
     input[type="number"],
     select {
@@ -844,21 +808,27 @@
 
       <div>
         <div class="controls">
-          <div class="source-filter-row">
+          <div class="row">
             <input id="sourceSearch" type="text" placeholder="Search sources by name/path (optional)" oninput="renderSourceOptions()" />
-
             <select id="sourceTypeFilter" onchange="renderSourceOptions()">
               <option value="">All source types</option>
               <option value="upload">Uploads</option>
               <option value="git">Git</option>
               <option value="local">Local</option>
             </select>
+            <label class="inline-check">
+              <input id="showAllSources" type="checkbox" onchange="renderSourceOptions()" />
+              Show all sources
+            </label>
+            <button class="secondary-btn" onclick="toggleUploadPanel()">Uploads</button>
+          </div>
 
+          <div class="row">
             <select id="sourceSelect">
               <option value="">All sources</option>
             </select>
-
-            <button class="secondary-btn" onclick="toggleUploadPanel()">Uploads</button>
+            <input id="pageStart" class="small-input" type="number" min="1" placeholder="Page start" />
+            <input id="pageEnd" class="small-input" type="number" min="1" placeholder="Page end" />
           </div>
 
           <div id="sourceSummary" class="source-summary">Loading sources...</div>
@@ -920,8 +890,6 @@
     let activeEventSource = null;
     let activeRequestId = null;
     let stopRequested = false;
-    let activeLatencyTimer = null;
-    let activeLatencyStartedAt = null;
 
     function applySidebarState() {
       const app = document.querySelector(".app");
@@ -1024,6 +992,7 @@
     function filterSources(items) {
       const search = document.getElementById("sourceSearch").value.trim().toLowerCase();
       const typeFilter = document.getElementById("sourceTypeFilter").value.trim();
+      const showAll = document.getElementById("showAllSources").checked;
 
       let filtered = sortSourcesNewestFirst(items);
 
@@ -1043,6 +1012,10 @@
 
           return haystack.includes(search);
         });
+      }
+
+      if (!showAll && !search) {
+        filtered = filtered.slice(0, RECENT_SOURCE_LIMIT);
       }
 
       return filtered;
@@ -1072,14 +1045,16 @@
 
       const total = allSources.length;
       const shown = filtered.length;
+      const showAll = document.getElementById("showAllSources").checked;
       const search = document.getElementById("sourceSearch").value.trim();
       const typeFilter = document.getElementById("sourceTypeFilter").value.trim();
 
       let mode = "";
-      if (search) mode = `Showing ${shown} matching source(s) out of ${total}`;
-      else mode = `Showing ${shown} source(s) out of ${total}`;
+      if (search) mode = `Showing ${shown} matching source(s)`;
+      else if (showAll) mode = `Showing all ${shown} source(s)`;
+      else mode = `Showing ${shown} recent source(s) out of ${total}`;
 
-      if (typeFilter) mode += ` | type: ${typeFilter}`;
+      if (typeFilter) mode += ` | filtered by type: ${typeFilter}`;
       summary.textContent = total === 0 ? "No sources available yet." : mode;
     }
 
@@ -1139,7 +1114,7 @@
                   <div><strong>Planner confidence:</strong> ${escapeHtml(meta.intent_confidence ?? "n/a")}</div>
                   <div><strong>Router:</strong> ${escapeHtml(meta.router ?? "n/a")}</div>
                   <div><strong>Verifier:</strong> ${escapeHtml(meta.verification_verdict ?? "n/a")}</div>
-                  <div><strong>Latency:</strong> ${escapeHtml(meta.latency_display || (meta.latency_ms ? `${Math.round(Number(meta.latency_ms) / 1000)}s` : "n/a"))}</div>
+                  <div><strong>Latency:</strong> ${escapeHtml(meta.latency_ms ? `${meta.latency_ms} ms` : "n/a")}</div>
                 </div>
                 <div style="margin-top:6px;"><strong>Reason:</strong> ${escapeHtml(meta.intent_reason || "n/a")}</div>
               </div>
@@ -1428,54 +1403,6 @@
       }
     }
 
-    function formatLatencySeconds(ms) {
-      const seconds = Math.max(0, Math.round(Number(ms || 0) / 1000));
-      return `${seconds}s`;
-    }
-
-    function stopLatencyTimer(finalLatencyMs = null) {
-      if (activeLatencyTimer) {
-        clearInterval(activeLatencyTimer);
-        activeLatencyTimer = null;
-      }
-
-      if (finalLatencyMs !== null && finalLatencyMs !== undefined) {
-        const last = messages[messages.length - 1];
-        if (last && last.role === "assistant") {
-          last.meta = {
-            ...(last.meta || {}),
-            latency_ms: finalLatencyMs,
-            latency_display: formatLatencySeconds(finalLatencyMs),
-          };
-          renderMessages();
-        }
-      }
-
-      activeLatencyStartedAt = null;
-    }
-
-    function startLatencyTimer() {
-      stopLatencyTimer();
-
-      activeLatencyStartedAt = Date.now();
-
-      activeLatencyTimer = setInterval(() => {
-        if (!activeLatencyStartedAt || !isAsking) return;
-
-        const elapsedMs = Date.now() - activeLatencyStartedAt;
-        const last = messages[messages.length - 1];
-
-        if (!last || last.role !== "assistant") return;
-
-        last.meta = {
-          ...(last.meta || {}),
-          latency_display: formatLatencySeconds(elapsedMs),
-        };
-
-        renderMessages();
-      }, 1000);
-    }
-
     function finishAskButton() {
       const input = document.getElementById("question");
       const askButton = document.getElementById("askButton");
@@ -1550,7 +1477,6 @@
         renderMessages();
       }
 
-      stopLatencyTimer();
       finishAskButton();
     }
 
@@ -1560,13 +1486,12 @@
       const q = input.value.trim();
 
       const sourceId = document.getElementById("sourceSelect").value.trim();
-      const pageStart = "";
-      const pageEnd = "";
+      const pageStart = document.getElementById("pageStart").value.trim();
+      const pageEnd = document.getElementById("pageEnd").value.trim();
 
       if (!q || isAsking) return;
 
       startAskButton();
-      startLatencyTimer();
       input.value = "";
 
       addLocalMessage("user", q);
@@ -1578,7 +1503,6 @@
           intent_reason: "Waiting for backend router.",
           router: "",
           latency_ms: "",
-          latency_display: "0s",
           verification_verdict: "n/a",
           progress: 5,
           progress_label: "Starting...",
@@ -1624,7 +1548,6 @@
             intent_reason: data.intent_reason,
             router: data.router,
             latency_ms: "",
-            latency_display: meta.latency_display || "0s",
             verification_verdict: data.verification_verdict || "pending",
             progress: data.progress ?? 15,
             progress_label: data.progress_label || "Searching evidence.",
@@ -1703,7 +1626,6 @@
           updateLastAssistant(finalText, { meta, citations });
 
           if (eventSource) eventSource.close();
-          stopLatencyTimer(data.latency_ms ?? null);
           finishAskButton();
         });
 
@@ -1714,10 +1636,6 @@
 
           if (data.latency_ms !== undefined && data.latency_ms !== null) {
             meta.latency_ms = data.latency_ms;
-            meta.latency_display = formatLatencySeconds(data.latency_ms);
-            stopLatencyTimer(data.latency_ms);
-          } else {
-            stopLatencyTimer();
           }
 
           if (Array.isArray(data.citations)) {
@@ -1774,7 +1692,6 @@
 
           if (eventSource) eventSource.close();
           activeEventSource = null;
-          stopLatencyTimer();
           finishAskButton();
         });
 
@@ -1786,7 +1703,6 @@
           updateLastAssistant("Request failed: " + err.message);
         }
 
-        stopLatencyTimer();
         finishAskButton();
       }
     }
