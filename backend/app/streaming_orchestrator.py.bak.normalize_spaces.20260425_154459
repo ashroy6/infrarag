@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import json
 import os
 import time
@@ -46,7 +45,7 @@ def _sse(event: str, data: dict[str, Any]) -> str:
 
 
 def normalize_question(question: str) -> str:
-    return re.sub(r"\s+", " ", (question or "").strip())
+    return (question or "").strip()
 
 
 def _pipeline_limits(pipeline_used: str) -> tuple[int, int]:

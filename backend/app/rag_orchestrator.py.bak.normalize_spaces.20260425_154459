@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import time
 from typing import Any
 
@@ -23,7 +22,7 @@ from app.pipelines import repo_explanation
 
 
 def normalize_question(question: str) -> str:
-    return re.sub(r"\s+", " ", (question or "").strip())
+    return (question or "").strip()
 
 
 def _run_selected_pipeline(

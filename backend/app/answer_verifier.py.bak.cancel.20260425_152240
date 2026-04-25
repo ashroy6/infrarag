@@ -3,12 +3,10 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Callable
 from typing import Any
 
 import requests
 
-from app.llm_client import LLMCancelled
 from app.prompts import VERIFIER_PROMPT
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
@@ -61,24 +59,13 @@ def _extract_json(raw: str) -> dict[str, Any] | None:
         return None
 
 
-def _call_ollama_json_stream(
-    prompt: str,
-    cancel_check: Callable[[], bool] | None = None,
-) -> str:
-    def cancelled() -> bool:
-        return bool(cancel_check and cancel_check())
-
-    if cancelled():
-        raise LLMCancelled("Verifier cancelled before Ollama request started")
-
-    collected: list[str] = []
-
-    with requests.post(
+def _call_ollama_json(prompt: str) -> str:
+    response = requests.post(
         f"{OLLAMA_BASE_URL}/api/generate",
         json={
             "model": CHAT_MODEL,
             "prompt": prompt,
-            "stream": True,
+            "stream": False,
             "format": "json",
             "options": {
                 "temperature": 0,
@@ -86,30 +73,10 @@ def _call_ollama_json_stream(
             },
         },
         timeout=VERIFIER_TIMEOUT_SECONDS,
-        stream=True,
-    ) as response:
-        response.raise_for_status()
-
-        for raw_line in response.iter_lines(decode_unicode=True):
-            if cancelled():
-                raise LLMCancelled("Verifier cancelled by user")
-
-            if not raw_line:
-                continue
-
-            try:
-                data = json.loads(raw_line)
-            except json.JSONDecodeError:
-                continue
-
-            token = data.get("response")
-            if token:
-                collected.append(token)
-
-            if data.get("done") is True:
-                break
-
-    return "".join(collected)
+    )
+    response.raise_for_status()
+    data = response.json()
+    return str(data.get("response", "") or "")
 
 
 def _normalize_verdict(
@@ -125,6 +92,7 @@ def _normalize_verdict(
         "supported": "valid",
         "pass": "valid",
         "passed": "valid",
+
         "needs_revision": "needs_revision",
         "needs_revisions": "needs_revision",
         "revision_needed": "needs_revision",
@@ -132,6 +100,7 @@ def _normalize_verdict(
         "revised": "needs_revision",
         "partially_supported": "needs_revision",
         "partially_valid": "needs_revision",
+
         "insufficient_evidence": "insufficient_evidence",
         "not_enough_evidence": "insufficient_evidence",
         "unsupported": "insufficient_evidence",
@@ -148,6 +117,7 @@ def _normalize_verdict(
             and corrected_answer.strip() != "No evidence found in the knowledge base."
         ):
             return "needs_revision"
+
         return normalized
 
     if corrected_answer.strip() and corrected_answer.strip() != draft_answer.strip():
@@ -205,11 +175,7 @@ def verify_answer(
     pipeline_used: str,
     context_text: str,
     draft_answer: str,
-    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    if cancel_check and cancel_check():
-        raise LLMCancelled("Verifier cancelled before start")
-
     if not context_text.strip():
         return _fallback_verification(
             draft_answer,
@@ -224,13 +190,12 @@ def verify_answer(
     )
 
     try:
-        raw = _call_ollama_json_stream(prompt, cancel_check=cancel_check)
-    except LLMCancelled:
-        raise
+        raw = _call_ollama_json(prompt)
     except Exception as exc:
         return _fallback_verification(draft_answer, f"Verifier failed: {exc}")
 
     data = _extract_json(raw)
+
     if not data:
         return _fallback_verification(
             draft_answer,

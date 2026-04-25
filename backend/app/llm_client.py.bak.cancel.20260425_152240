@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
 from typing import Any, Iterator
 
 import requests
@@ -13,10 +12,6 @@ OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
 
 
 class LLMError(RuntimeError):
-    pass
-
-
-class LLMCancelled(RuntimeError):
     pass
 
 
@@ -69,15 +64,13 @@ def stream_generate_text(
     temperature: float = 0.0,
     num_predict: int = 512,
     timeout: int | None = None,
-    cancel_check: Callable[[], bool] | None = None,
 ) -> Iterator[str]:
+    """
+    Streams Ollama tokens/chunks.
+
+    Yields text fragments as they arrive.
+    """
     selected_model = model or CHAT_MODEL
-
-    def cancelled() -> bool:
-        return bool(cancel_check and cancel_check())
-
-    if cancelled():
-        raise LLMCancelled("Generation cancelled before Ollama request started")
 
     try:
         with requests.post(
@@ -98,9 +91,6 @@ def stream_generate_text(
                 raise LLMError(f"Ollama returned HTTP {response.status_code}: {response.text[:500]}")
 
             for raw_line in response.iter_lines(decode_unicode=True):
-                if cancelled():
-                    raise LLMCancelled("Generation cancelled by user")
-
                 if not raw_line:
                     continue
 
@@ -116,8 +106,6 @@ def stream_generate_text(
                 if data.get("done") is True:
                     break
 
-    except LLMCancelled:
-        raise
     except requests.Timeout as exc:
         raise LLMError("Ollama streaming request timed out") from exc
     except requests.RequestException as exc:

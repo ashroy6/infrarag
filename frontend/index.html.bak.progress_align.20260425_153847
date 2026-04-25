@@ -388,40 +388,17 @@
     }
 
     .mini-progress {
-      min-width: 190px;
-      max-width: 260px;
+      min-width: 160px;
     }
 
     .mini-progress-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 52px;
+      display: flex;
+      justify-content: space-between;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
       font-size: 11px;
       color: #cbd5e1;
       margin-bottom: 4px;
-      width: 100%;
-    }
-
-    .mini-progress-row span {
-      min-width: 0;
-      line-height: 1.25;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      display: block;
-    }
-
-    .mini-progress-row strong {
-      display: block;
-      width: 52px;
-      min-width: 52px;
-      text-align: right;
-      white-space: nowrap;
-      word-break: keep-all;
-      overflow-wrap: normal;
-      line-height: 1.25;
-      font-variant-numeric: tabular-nums;
     }
 
     .mini-progress-track {
@@ -1660,20 +1637,7 @@
         eventSource.addEventListener("error", event => {
           if (closedNormally || stopRequested) return;
 
-          let errorMessage = "Request failed: streaming connection error.";
-
-          if (event && event.data) {
-            try {
-              const data = JSON.parse(event.data);
-              if (data && data.message) {
-                errorMessage = "Request failed: " + data.message;
-              }
-            } catch {
-              errorMessage = "Request failed: " + String(event.data);
-            }
-          }
-
-          updateLastAssistant(errorMessage, {
+          updateLastAssistant("Request failed: streaming connection error.", {
             meta,
             citations: [],
           });

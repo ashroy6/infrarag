@@ -21,7 +21,6 @@ from app.retrieve import retrieve_context
 from app.uploads import save_upload, save_uploads
 from app.summary_jobs import get_summary_job
 from app.streaming_orchestrator import stream_ask_events
-from app.cancel_registry import cancel_request
 from app.chat_history import delete_conversation, get_messages, list_conversations, rename_conversation
 from app.rag_orchestrator import run_ask
 from app.qdrant_client import get_chunk_by_source_id_and_index
@@ -418,7 +417,6 @@ def ask_stream(
     file_type: str | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
-    request_id: str | None = None,
 ):
     if not q:
         raise InfraRAGError("query parameter 'q' is required", status_code=400, code="missing_query")
@@ -433,7 +431,6 @@ def ask_stream(
             file_type=file_type,
             page_start=page_start,
             page_end=page_end,
-            request_id=request_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -441,21 +438,6 @@ def ask_stream(
             "X-Accel-Buffering": "no",
         },
     )
-
-
-@app.post("/cancel")
-def api_cancel_request(payload: dict):
-    request_id = str((payload or {}).get("request_id") or "").strip()
-
-    if not request_id:
-        raise InfraRAGError("request_id is required", status_code=400, code="missing_request_id")
-
-    cancel_request(request_id, reason="Cancelled by user from UI.")
-
-    return {
-        "status": "cancelled",
-        "request_id": request_id,
-    }
 
 
 @app.get("/summary-jobs/{job_id}")

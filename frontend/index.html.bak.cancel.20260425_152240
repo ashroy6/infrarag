@@ -47,21 +47,6 @@
       grid-template-columns: 280px 1fr;
       height: 100vh;
       background: var(--bg);
-      transition: grid-template-columns 0.2s ease;
-    }
-
-    .app.sidebar-collapsed {
-      grid-template-columns: 0 1fr;
-    }
-
-    .app.sidebar-collapsed .sidebar {
-      transform: translateX(-100%);
-      opacity: 0;
-      pointer-events: none;
-    }
-
-    .app.sidebar-collapsed .composer {
-      left: 0;
     }
 
     .sidebar {
@@ -70,8 +55,6 @@
       display: flex;
       flex-direction: column;
       min-width: 0;
-      overflow: hidden;
-      transition: transform 0.2s ease, opacity 0.2s ease;
     }
 
     .sidebar-header {
@@ -165,35 +148,9 @@
     }
 
     .top {
-      padding: 10px 18px;
+      padding: 14px 18px 10px;
       border-bottom: 1px solid #2a2a2a;
       background: #1f1f1f;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .sidebar-toggle {
-      width: 36px;
-      height: 36px;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      background: #252525;
-      color: #ffffff;
-      cursor: pointer;
-      font-size: 18px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-    }
-
-    .sidebar-toggle:hover {
-      background: #303030;
-    }
-
-    .top-title {
-      min-width: 0;
     }
 
     .top h1 {
@@ -364,203 +321,60 @@
     }
 
     .meta-box {
-      background: #242424;
+      background: var(--meta-bg);
       border: 1px solid #3a3a3a;
       border-radius: 10px;
-      padding: 7px 9px;
+      padding: 8px 10px;
       margin: 0 0 8px 0;
-      font-size: 12.5px;
-      color: #cbd5e1;
+      font-size: 13px;
+      color: #d1d5db;
       white-space: normal;
-    }
-
-    .meta-head {
-      display: grid;
-      grid-template-columns: 1fr 170px;
-      gap: 12px;
-      align-items: center;
     }
 
     .meta-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
       gap: 4px 10px;
-    }
-
-    .mini-progress {
-      min-width: 190px;
-      max-width: 260px;
-    }
-
-    .mini-progress-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 52px;
-      align-items: center;
-      gap: 10px;
-      font-size: 11px;
-      color: #cbd5e1;
-      margin-bottom: 4px;
-      width: 100%;
-    }
-
-    .mini-progress-row span {
-      min-width: 0;
-      line-height: 1.25;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      display: block;
-    }
-
-    .mini-progress-row strong {
-      display: block;
-      width: 52px;
-      min-width: 52px;
-      text-align: right;
-      white-space: nowrap;
-      word-break: keep-all;
-      overflow-wrap: normal;
-      line-height: 1.25;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .mini-progress-track {
-      height: 7px;
-      width: 100%;
-      background: #171717;
-      border: 1px solid #3a3a3a;
-      border-radius: 999px;
-      overflow: hidden;
-    }
-
-    .mini-progress-fill {
-      height: 100%;
-      width: 0%;
-      background: var(--accent);
-      border-radius: 999px;
-      transition: width 0.25s ease;
-    }
-
-    @media (max-width: 900px) {
-      .meta-head {
-        grid-template-columns: 1fr;
-      }
-
-      .mini-progress {
-        min-width: 0;
-      }
-    }
-
-    .answer-section {
-      margin-top: 10px;
-    }
-
-    .answer-label {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 12px;
-      font-weight: 800;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: #a7f3d0;
-      margin-bottom: 7px;
-    }
-
-    .answer-label::before {
-      content: "";
-      width: 7px;
-      height: 7px;
-      border-radius: 999px;
-      background: var(--accent);
-      display: inline-block;
     }
 
     .assistant-answer {
       margin-top: 0;
-      font-size: 16.5px;
-      line-height: 1.65;
-      color: #ffffff;
+      font-size: 15px;
+      color: #f3f4f6;
       white-space: pre-wrap;
-      background: #303030;
-      border: 1px solid #474747;
-      border-left: 4px solid var(--accent);
-      border-radius: 12px;
-      padding: 14px 16px;
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
     }
 
     .citations {
       margin-top: 12px;
       border-top: 1px solid #3a3a3a;
-      padding-top: 8px;
-      font-size: 12px;
-      color: #cbd5e1;
+      padding-top: 10px;
+      font-size: 13px;
+      color: #d1d5db;
       white-space: normal;
     }
 
-    .citations details {
-      border: 1px solid #3a3a3a;
-      border-radius: 12px;
-      background: #262626;
-      padding: 8px 10px;
-    }
-
-    .citations summary {
-      cursor: pointer;
-      font-weight: 800;
-      color: #d1d5db;
-      list-style: none;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-    }
-
-    .citations summary::-webkit-details-marker {
-      display: none;
-    }
-
-    .citations summary::after {
-      content: "Show";
-      font-size: 11px;
-      color: #9ca3af;
+    .citations-title {
       font-weight: 700;
-    }
-
-    .citations details[open] summary::after {
-      content: "Hide";
-    }
-
-    .citation-list {
-      margin-top: 8px;
+      margin-bottom: 8px;
     }
 
     .citation-btn {
       width: 100%;
       text-align: left;
-      background: #2b2b2b;
-      color: #d1d5db;
-      border: 1px solid #3c3c3c;
-      border-radius: 9px;
-      padding: 7px 9px;
-      margin-top: 5px;
+      background: #2f2f2f;
+      color: #e5e7eb;
+      border: 1px solid #424242;
+      border-radius: 10px;
+      padding: 8px 10px;
+      margin-top: 6px;
       cursor: pointer;
-      font-size: 12px;
-      line-height: 1.35;
+      font-size: 13px;
+      line-height: 1.45;
     }
 
     .citation-btn:hover {
-      background: #333333;
+      background: #383838;
       border-color: #555555;
-      color: #ffffff;
-    }
-
-    .citation-source-line {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 100%;
     }
 
     .composer {
@@ -576,7 +390,7 @@
       max-width: 980px;
       margin: 0 auto;
       display: grid;
-      grid-template-columns: 1fr auto auto;
+      grid-template-columns: 1fr auto;
       gap: 10px;
       background: var(--input-bg);
       border: 1px solid var(--border);
@@ -616,31 +430,6 @@
     .ask-btn:disabled {
       background: #9ca3af;
       color: #111111;
-      cursor: not-allowed;
-    }
-
-    .stop-btn {
-      border: 1px solid #525252;
-      border-radius: 12px;
-      background: #2f2f2f;
-      color: #ffffff;
-      padding: 10px 14px;
-      cursor: pointer;
-      font-size: 14px;
-      font-weight: 700;
-      display: none;
-    }
-
-    .stop-btn.visible {
-      display: inline-block;
-    }
-
-    .stop-btn:hover {
-      background: #3a3a3a;
-    }
-
-    .stop-btn:disabled {
-      opacity: 0.55;
       cursor: not-allowed;
     }
 
@@ -751,10 +540,6 @@
         left: 0;
       }
 
-      .app.sidebar-collapsed {
-        grid-template-columns: 1fr;
-      }
-
       .message {
         grid-template-columns: 34px 1fr;
       }
@@ -787,11 +572,8 @@
 
     <main class="main">
       <div class="top">
-        <button id="sidebarToggle" class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">☰</button>
-        <div class="top-title">
-          <h1>InfraRAG</h1>
-          <p>Private RAG assistant with LLM query planning, citations, and chat history.</p>
-        </div>
+        <h1>InfraRAG</h1>
+        <p>Private RAG assistant with LLM query planning, citations, and chat history.</p>
       </div>
 
       <div>
@@ -847,7 +629,6 @@
       <div class="composer">
         <div class="composer-inner">
           <input id="question" type="text" placeholder="Ask a question..." onkeydown="handleQuestionKey(event)" />
-          <button id="stopButton" class="stop-btn" onclick="stopGeneration()" disabled>Stop</button>
           <button id="askButton" class="ask-btn" onclick="askQuestion()">Ask</button>
         </div>
       </div>
@@ -874,31 +655,6 @@
     let currentConversationId = null;
     let messages = [];
     let isAsking = false;
-    let sidebarCollapsed = localStorage.getItem("infrarag_sidebar_collapsed") === "true";
-    let activeEventSource = null;
-    let activeRequestId = null;
-    let stopRequested = false;
-
-    function applySidebarState() {
-      const app = document.querySelector(".app");
-      const toggle = document.getElementById("sidebarToggle");
-
-      if (!app) return;
-
-      app.classList.toggle("sidebar-collapsed", sidebarCollapsed);
-
-      if (toggle) {
-        toggle.textContent = sidebarCollapsed ? "☰" : "✕";
-        toggle.title = sidebarCollapsed ? "Show sidebar" : "Hide sidebar";
-      }
-
-      localStorage.setItem("infrarag_sidebar_collapsed", sidebarCollapsed ? "true" : "false");
-    }
-
-    function toggleSidebar() {
-      sidebarCollapsed = !sidebarCollapsed;
-      applySidebarState();
-    }
 
     function escapeHtml(value) {
       return String(value ?? "")
@@ -1092,57 +848,34 @@
         const citations = Array.isArray(message.citations) ? message.citations : [];
         const pipelineLabel = meta.pipeline_label || meta.pipeline_used || "";
 
-        const progress = clampProgress(meta.progress ?? 0);
         const metaHtml = pipelineLabel ? `
           <div class="meta-box">
-            <div class="meta-head">
-              <div>
-                <div class="meta-grid">
-                  <div><strong>Pipeline:</strong> ${escapeHtml(pipelineLabel)}</div>
-                  <div><strong>Planner confidence:</strong> ${escapeHtml(meta.intent_confidence ?? "n/a")}</div>
-                  <div><strong>Router:</strong> ${escapeHtml(meta.router ?? "n/a")}</div>
-                  <div><strong>Verifier:</strong> ${escapeHtml(meta.verification_verdict ?? "n/a")}</div>
-                  <div><strong>Latency:</strong> ${escapeHtml(meta.latency_ms ? `${meta.latency_ms} ms` : "n/a")}</div>
-                </div>
-                <div style="margin-top:6px;"><strong>Reason:</strong> ${escapeHtml(meta.intent_reason || "n/a")}</div>
-              </div>
-              <div class="mini-progress">
-                <div class="mini-progress-row">
-                  <span>${escapeHtml(meta.progress_label || "Progress")}</span>
-                  <strong>${escapeHtml(progress)}%</strong>
-                </div>
-                <div class="mini-progress-track">
-                  <div class="mini-progress-fill" style="width:${escapeHtml(progress)}%"></div>
-                </div>
-              </div>
+            <div class="meta-grid">
+              <div><strong>Pipeline:</strong> ${escapeHtml(pipelineLabel)}</div>
+              <div><strong>Planner confidence:</strong> ${escapeHtml(meta.intent_confidence ?? "n/a")}</div>
+              <div><strong>Router:</strong> ${escapeHtml(meta.router ?? "n/a")}</div>
+              <div><strong>Verifier:</strong> ${escapeHtml(meta.verification_verdict ?? "n/a")}</div>
+              <div><strong>Latency:</strong> ${escapeHtml(meta.latency_ms ? `${meta.latency_ms} ms` : "n/a")}</div>
             </div>
+            <div style="margin-top:6px;"><strong>Reason:</strong> ${escapeHtml(meta.intent_reason || "n/a")}</div>
           </div>
         ` : "";
 
         const citationsHtml = citations.length ? `
           <div class="citations">
-            <details>
-              <summary>Sources / Citations (${escapeHtml(citations.length)})</summary>
-              <div class="citation-list">
-                ${citations.map(c => `
-                  <button
-                    class="citation-btn"
-                    onclick="openCitation('${escapeHtml(c.source_id || "")}', ${Number.isFinite(Number(c.chunk_index)) ? Number(c.chunk_index) : -1})"
-                  >
-                    <div class="citation-source-line"><strong>[${escapeHtml(c.citation_id ?? "")}]</strong> ${escapeHtml(c.source || "unknown")}</div>
-                    <div>Chunk: ${escapeHtml(c.chunk_index ?? "")} | Score: ${escapeHtml(c.score ?? "")}${c.page_number ? ` | Page: ${escapeHtml(c.page_number)}` : ""}</div>
-                  </button>
-                `).join("")}
-              </div>
-            </details>
+            <div class="citations-title">Citations</div>
+            ${citations.map(c => `
+              <button
+                class="citation-btn"
+                onclick="openCitation('${escapeHtml(c.source_id || "")}', ${Number.isFinite(Number(c.chunk_index)) ? Number(c.chunk_index) : -1})"
+              >
+                <div><strong>[${escapeHtml(c.citation_id ?? "")}]</strong> ${escapeHtml(c.source || "unknown")}</div>
+                <div>Chunk: ${escapeHtml(c.chunk_index ?? "")} | Score: ${escapeHtml(c.score ?? "")}${c.page_number ? ` | Page: ${escapeHtml(c.page_number)}` : ""}</div>
+              </button>
+            `).join("")}
           </div>
         ` : `
-          <div class="citations">
-            <details>
-              <summary>Sources / Citations (0)</summary>
-              <div class="citation-list">none</div>
-            </details>
-          </div>
+          <div class="citations"><div class="citations-title">Citations</div>none</div>
         `;
 
         return `
@@ -1150,10 +883,7 @@
             <div class="avatar assistant">AI</div>
             <div class="bubble">
               ${metaHtml}
-              <div class="answer-section">
-                <div class="answer-label">Answer</div>
-                <div class="assistant-answer">${escapeHtml(message.content)}</div>
-              </div>
+              <div class="assistant-answer">${escapeHtml(message.content)}</div>
               ${citationsHtml}
             </div>
           </div>
@@ -1166,33 +896,6 @@
     function addLocalMessage(role, content, extra = {}) {
       messages.push({ role, content, ...extra });
       renderMessages();
-    }
-
-    function clampProgress(value) {
-      const number = Number(value);
-      if (!Number.isFinite(number)) return 0;
-      return Math.max(0, Math.min(100, Math.round(number)));
-    }
-
-    function updateProgress(progress, label) {
-      const last = messages[messages.length - 1];
-      if (!last || last.role !== "assistant") return;
-
-      last.meta = {
-        ...(last.meta || {}),
-        progress: clampProgress(progress),
-        progress_label: label || last.meta?.progress_label || "",
-      };
-
-      renderMessages();
-    }
-
-    function generateRequestId() {
-      if (window.crypto && crypto.randomUUID) {
-        return crypto.randomUUID();
-      }
-
-      return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     }
 
     function newChat() {
@@ -1349,16 +1052,8 @@
         const status = job.status || "unknown";
 
         if (status === "queued" || status === "running") {
-          const pct = total ? Math.min(95, Math.max(10, Math.round((current / total) * 95))) : 20;
-
           updateLastAssistant(
-            `Document summary is running...\nProgress: ${current}/${total || "?"}`,
-            {
-              meta: {
-                progress: pct,
-                progress_label: `Document summary ${status}: ${current}/${total || "?"}`,
-              }
-            }
+            `Document summary is running...\nProgress: ${current}/${total || "?"}`
           );
           continue;
         }
@@ -1374,9 +1069,6 @@
               intent_reason: "Background document summary completed.",
               router: "background",
               latency_ms: "",
-              verification_verdict: "n/a",
-              progress: 100,
-              progress_label: "Done.",
             }
           });
           await loadConversations();
@@ -1394,78 +1086,11 @@
     function finishAskButton() {
       const input = document.getElementById("question");
       const askButton = document.getElementById("askButton");
-      const stopButton = document.getElementById("stopButton");
 
       isAsking = false;
-      activeEventSource = null;
-      activeRequestId = null;
-
       askButton.disabled = false;
       askButton.textContent = "Ask";
-
-      stopButton.disabled = true;
-      stopButton.classList.remove("visible");
-
       input.focus();
-    }
-
-    function startAskButton() {
-      const askButton = document.getElementById("askButton");
-      const stopButton = document.getElementById("stopButton");
-
-      isAsking = true;
-      stopRequested = false;
-
-      askButton.disabled = true;
-      askButton.textContent = "Thinking...";
-
-      stopButton.disabled = false;
-      stopButton.classList.add("visible");
-    }
-
-    async function stopGeneration() {
-      if (!isAsking) return;
-
-      stopRequested = true;
-
-      const requestId = activeRequestId;
-
-      if (requestId) {
-        try {
-          await fetch("/api/cancel", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ request_id: requestId }),
-          });
-        } catch (err) {
-          console.error("Cancel request failed:", err);
-        }
-      }
-
-      if (activeEventSource) {
-        activeEventSource.close();
-        activeEventSource = null;
-      }
-
-      const last = messages[messages.length - 1];
-      if (last && last.role === "assistant") {
-        last.meta = {
-          ...(last.meta || {}),
-          progress: 100,
-          progress_label: "Cancelled.",
-          verification_verdict: last.meta?.verification_verdict || "cancelled",
-        };
-
-        if (!String(last.content || "").trim() || String(last.content || "").includes("Routing question")) {
-          last.content = "Cancelled by user.";
-        } else if (!String(last.content || "").includes("[Cancelled by user]")) {
-          last.content = String(last.content || "").trim() + "\n\n[Cancelled by user]";
-        }
-
-        renderMessages();
-      }
-
-      finishAskButton();
     }
 
     async function askQuestion() {
@@ -1479,7 +1104,9 @@
 
       if (!q || isAsking) return;
 
-      startAskButton();
+      isAsking = true;
+      askButton.disabled = true;
+      askButton.textContent = "Thinking...";
       input.value = "";
 
       addLocalMessage("user", q);
@@ -1491,17 +1118,11 @@
           intent_reason: "Waiting for backend router.",
           router: "",
           latency_ms: "",
-          verification_verdict: "n/a",
-          progress: 5,
-          progress_label: "Starting...",
         }
       });
 
       const params = new URLSearchParams();
-      activeRequestId = generateRequestId();
-
       params.set("q", q);
-      params.set("request_id", activeRequestId);
 
       if (currentConversationId) params.set("conversation_id", currentConversationId);
       if (sourceId) params.set("source_id", sourceId);
@@ -1516,13 +1137,6 @@
 
       try {
         eventSource = new EventSource(`/api/ask-stream?${params.toString()}`);
-        activeEventSource = eventSource;
-
-        eventSource.addEventListener("request", event => {
-          const data = JSON.parse(event.data);
-          activeRequestId = data.request_id || activeRequestId;
-          updateProgress(data.progress ?? 5, data.progress_label || "Request registered.");
-        });
 
         eventSource.addEventListener("meta", event => {
           const data = JSON.parse(event.data);
@@ -1537,8 +1151,6 @@
             router: data.router,
             latency_ms: "",
             verification_verdict: data.verification_verdict || "pending",
-            progress: data.progress ?? 15,
-            progress_label: data.progress_label || "Searching evidence.",
           };
 
           updateLastAssistant(answer || "Searching sources...", { meta, citations });
@@ -1547,24 +1159,18 @@
         eventSource.addEventListener("citations", event => {
           const data = JSON.parse(event.data);
           citations = Array.isArray(data.citations) ? data.citations : [];
-          meta.progress = data.progress ?? 35;
-          meta.progress_label = data.progress_label || "Evidence found. Generating answer.";
           updateLastAssistant(answer || "Evidence found. Generating answer...", { meta, citations });
         });
 
         eventSource.addEventListener("token", event => {
           const data = JSON.parse(event.data);
           answer += data.token || "";
-          meta.progress = data.progress ?? Math.max(Number(meta.progress || 0), Math.min(85, 45 + Math.floor(answer.length / 120)));
-          meta.progress_label = data.progress_label || "Generating answer.";
           updateLastAssistant(answer || "Thinking...", { meta, citations });
         });
 
         eventSource.addEventListener("verification_status", event => {
           const data = JSON.parse(event.data);
           meta.verification_verdict = data.verification_verdict || "running";
-          meta.progress = data.progress ?? 90;
-          meta.progress_label = data.progress_label || data.message || "Verifying answer.";
           updateLastAssistant(answer || data.message || "Verifying answer...", { meta, citations });
         });
 
@@ -1580,8 +1186,6 @@
           meta.unsupported_claims = Array.isArray(data.unsupported_claims)
             ? data.unsupported_claims
             : [];
-          meta.progress = data.progress ?? 95;
-          meta.progress_label = data.progress_label || "Verification complete.";
 
           updateLastAssistant(answer, { meta, citations });
         });
@@ -1590,31 +1194,11 @@
           const data = JSON.parse(event.data);
 
           answer = data.message || "Document summary job started.";
-          meta.progress = data.progress ?? 10;
-          meta.progress_label = data.progress_label || "Document summary job started.";
           updateLastAssistant(`${answer}\nProgress: 0/?`, { meta, citations: [] });
 
           if (data.job_id) {
             pollSummaryJob(data.job_id);
           }
-        });
-
-        eventSource.addEventListener("cancelled", event => {
-          const data = JSON.parse(event.data);
-
-          closedNormally = true;
-          meta.progress = 100;
-          meta.progress_label = "Cancelled.";
-          meta.verification_verdict = "cancelled";
-
-          const finalText = answer.trim()
-            ? `${answer.trim()}\n\n[Cancelled by user]`
-            : "Cancelled by user.";
-
-          updateLastAssistant(finalText, { meta, citations });
-
-          if (eventSource) eventSource.close();
-          finishAskButton();
         });
 
         eventSource.addEventListener("done", async event => {
@@ -1642,9 +1226,6 @@
             meta.unsupported_claims = data.unsupported_claims;
           }
 
-          meta.progress = data.progress ?? 100;
-          meta.progress_label = data.progress_label || "Done.";
-
           const finalAnswer = answer.trim()
             ? answer
             : "No answer text was generated. Evidence may have been retrieved, but the model returned an empty response.";
@@ -1652,45 +1233,25 @@
           updateLastAssistant(finalAnswer, { meta, citations });
 
           eventSource.close();
-          activeEventSource = null;
           await loadConversations();
           finishAskButton();
         });
 
         eventSource.addEventListener("error", event => {
-          if (closedNormally || stopRequested) return;
+          if (closedNormally) return;
 
-          let errorMessage = "Request failed: streaming connection error.";
-
-          if (event && event.data) {
-            try {
-              const data = JSON.parse(event.data);
-              if (data && data.message) {
-                errorMessage = "Request failed: " + data.message;
-              }
-            } catch {
-              errorMessage = "Request failed: " + String(event.data);
-            }
-          }
-
-          updateLastAssistant(errorMessage, {
+          updateLastAssistant("Request failed: streaming connection error.", {
             meta,
             citations: [],
           });
 
           if (eventSource) eventSource.close();
-          activeEventSource = null;
           finishAskButton();
         });
 
       } catch (err) {
         if (eventSource) eventSource.close();
-        activeEventSource = null;
-
-        if (!stopRequested) {
-          updateLastAssistant("Request failed: " + err.message);
-        }
-
+        updateLastAssistant("Request failed: " + err.message);
         finishAskButton();
       }
     }
@@ -1888,7 +1449,6 @@
       }
     }
 
-    applySidebarState();
     loadSources();
     loadConversations();
   </script>

@@ -1660,20 +1660,7 @@
         eventSource.addEventListener("error", event => {
           if (closedNormally || stopRequested) return;
 
-          let errorMessage = "Request failed: streaming connection error.";
-
-          if (event && event.data) {
-            try {
-              const data = JSON.parse(event.data);
-              if (data && data.message) {
-                errorMessage = "Request failed: " + data.message;
-              }
-            } catch {
-              errorMessage = "Request failed: " + String(event.data);
-            }
-          }
-
-          updateLastAssistant(errorMessage, {
+          updateLastAssistant("Request failed: streaming connection error.", {
             meta,
             citations: [],
           });
