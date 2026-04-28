@@ -10,7 +10,7 @@ It is designed as a production-style private AI assistant that can ingest engine
 
 1. [InfraRAG Overview](#infrarag)
 2. [Architecture Diagram](#architecture-diagram)
-3. [Screenshots](#screenhots)
+3. [Screenshots](#screenshots)
 4. [What InfraRAG Does](#what-infrarag-does)
 5. [Core Use Cases](#core-use-cases)
 6. [Current Stack](#current-stack)
@@ -69,7 +69,7 @@ It is designed as a production-style private AI assistant that can ingest engine
 
 ---
 
-## Screenhots
+## Screenshots
 
 ![InfraRAG Architecture](infrarag_ui_screenshot.png)
 
