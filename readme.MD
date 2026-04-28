@@ -1,67 +1,90 @@
 # InfraRAG
 
-InfraRAG is a private, local-first Retrieval-Augmented Generation (RAG) system built for DevOps, cloud, Terraform, and engineering knowledge bases.
+InfraRAG is a private, local-first Retrieval-Augmented Generation system for DevOps, cloud, Terraform, runbooks, code repositories, PDFs, and internal engineering knowledge bases.
 
-It combines:
-
-- a **web frontend** for asking questions
-- a **FastAPI backend** for retrieval and orchestration
-- **Ollama** for local LLM inference and embeddings
-- **Qdrant** for vector storage and similarity search
-- **Nginx** as the reverse proxy
-- **Prometheus** for metrics scraping
-- **Grafana** for monitoring dashboards
-
-The goal is to turn raw documentation, code repositories, runbooks, Terraform modules, and internal engineering notes into a searchable private AI assistant that can answer grounded questions with citations.
+It is designed as a production-style private AI assistant that can ingest engineering documents, retrieve relevant context, rerank evidence, route questions to the right answer pipeline, generate grounded answers with citations, and keep an audit trail of what was asked and answered.
 
 ---
 
 ## Architecture Diagram
 
-![InfraRAG Architecture](architectural-diagram-infrarag.png)
+![InfraRAG Architecture](infrarag_architectural_flow.png)
 
 ---
 
+## Screeshots
+
+![InfraRAG Architecture](infrarag_ui_screenshot.png)
+
+![InfraRAG Architecture](infrarag_detailed_ui.png)
+
+![InfraRAG Architecture](infrarag_admin_panel.png)
+
+![InfraRAG Architecture](infrarag_chunk_ui.png)
+
+
+
 ## What InfraRAG Does
 
-InfraRAG lets you:
+InfraRAG turns your private engineering knowledge into a searchable AI assistant.
 
-- ingest selected files and folders from a local `docs/` corpus
-- chunk those files intelligently
-- generate embeddings using `nomic-embed-text`
+It can:
+
+- ingest local files, folders, uploaded files, PDFs, code, Terraform, YAML, Markdown, and runbooks
+- parse and chunk documents using structure-aware chunking
+- generate embeddings locally using Ollama and `nomic-embed-text`
 - store vectors and metadata in Qdrant
 - retrieve the most relevant chunks for a question
-- send retrieved context to Ollama
-- generate grounded answers with source citations
-- monitor the backend with Prometheus and Grafana
+- rerank retrieved chunks using a local BGE reranker
+- route questions automatically to the correct answer pipeline
+- generate answers using Ollama and `llama3.2:3b`
+- show pipeline metadata such as pipeline name, confidence, router reason, verifier status, and latency
+- provide citations linked to source files, chunks, and pages where available
+- store chat history and audit logs in SQLite
+- expose metrics through Prometheus and Grafana
 
-This makes it useful for:
+---
 
-- explaining private repos
-- answering Terraform questions from real module docs
+## Core Use Cases
+
+InfraRAG is useful for:
+
+- explaining private repositories
+- asking questions about Terraform modules
+- understanding AWS, Kubernetes, CI/CD, and DevOps documentation
+- summarising uploaded PDFs and books
 - searching internal runbooks
-- explaining CI/CD workflows
-- answering engineering questions from your own knowledge base
+- explaining incidents and troubleshooting steps
+- creating a private engineering knowledge assistant for a company
+- demonstrating local AI, RAG, observability, and DevOps platform engineering skills
 
 ---
 
 ## Current Stack
 
-### Core services
+| Layer | Tool |
+|---|---|
+| Frontend | Static HTML / JavaScript |
+| Admin UI | Static HTML / JavaScript |
+| Backend | FastAPI |
+| LLM Runtime | Ollama |
+| Chat Model | `llama3.2:3b` |
+| Embedding Model | `nomic-embed-text` |
+| Vector Database | Qdrant |
+| Reranker | Local BGE reranker |
+| Persistent Metadata | SQLite |
+| Reverse Proxy | Nginx |
+| Metrics | Prometheus |
+| Dashboards | Grafana |
+| Runtime | Docker Compose |
 
-- **Frontend**: static HTML/JS UI
-- **Backend**: FastAPI
-- **LLM runtime**: Ollama
-- **Embedding model**: `nomic-embed-text`
-- **Chat model**: `llama3.2:3b`
-- **Vector database**: Qdrant
-- **Reverse proxy**: Nginx
-- **Metrics**: Prometheus
-- **Dashboards**: Grafana
+---
 
-### Container layout
+## Services
 
-InfraRAG runs as a multi-container Docker Compose application:
+InfraRAG runs as a multi-container Docker Compose application.
+
+Main services:
 
 1. `frontend`
 2. `backend`
@@ -73,127 +96,378 @@ InfraRAG runs as a multi-container Docker Compose application:
 
 ---
 
+## New Features Added
+
+These are the latest major InfraRAG upgrades.
+
+### 1. Intent Router
+
+InfraRAG now has an intent router in the backend.
+
+It decides whether a user request should go to:
+
+- normal RAG Q&A
+- long explanation
+- full document summary
+- Terraform or repository explanation
+- incident or runbook troubleshooting
+
+This removes the need for the user to manually choose the pipeline.
+
+---
+
+### 2. RAG Orchestrator
+
+A central RAG orchestrator now controls the main answer flow.
+
+It coordinates:
+
+- routing
+- retrieval
+- reranking
+- prompt selection
+- chat history
+- citations
+- response formatting
+- audit logging
+
+This makes the backend cleaner and easier to extend.
+
+---
+
+### 3. Prompt Library
+
+Prompts are now separated into a dedicated prompt library.
+
+This keeps answer behaviour consistent across pipelines and controls:
+
+- normal answer style
+- long explanation style
+- document summary style
+- Terraform explanation style
+- incident/runbook style
+- citation rules
+- `No evidence found` behaviour
+- verifier and formatting rules
+
+---
+
+### 4. Multiple Answer Pipelines
+
+InfraRAG now supports multiple answer pipelines instead of one generic RAG flow.
+
+Current pipeline types:
+
+- normal RAG Q&A
+- long explanation
+- full document/book summary
+- Terraform/repo explanation
+- incident/runbook troubleshooting
+
+This is better than forcing every question through the same prompt.
+
+---
+
+### 5. Pipeline Metadata in UI
+
+The frontend now shows visible pipeline metadata above the answer.
+
+Displayed metadata includes:
+
+- pipeline used
+- router type
+- planner confidence
+- verifier status
+- latency
+- router reason
+
+This makes the system easier to debug and easier to demo.
+
+---
+
+### 6. Latency Timer
+
+The UI now includes a live latency timer.
+
+It shows how long the response takes in seconds, so users can see whether the request is fast, slow, or stuck.
+
+---
+
+### 7. Local BGE Reranker
+
+InfraRAG now has a reranker layer.
+
+The flow is:
+
+1. Qdrant retrieves a larger set of candidate chunks
+2. BGE reranker scores the candidates locally
+3. only the best chunks are passed to Ollama
+
+This improves answer quality because the LLM receives stronger context.
+
+---
+
+### 8. Clickable Citations
+
+Answers now support improved citations.
+
+Citations can point back to:
+
+- source file
+- source path
+- chunk
+- page number for PDFs where available
+
+This is important because private RAG must prove where the answer came from.
+
+---
+
+### 9. Chat History Support
+
+InfraRAG now has chat history support through the backend.
+
+The system can keep previous messages and use recent conversation context for follow-up questions.
+
+This moves the app closer to a ChatGPT-style private assistant.
+
+---
+
+### 10. SQLite Persistence
+
+InfraRAG uses SQLite for persistent metadata and history.
+
+SQLite stores:
+
+- source metadata
+- uploaded file records
+- ingestion status
+- chat conversations
+- chat messages
+- audit logs
+
+The database is stored under the backend data volume.
+
+---
+
+### 11. Audit Logging
+
+InfraRAG now includes an audit layer.
+
+The audit trail can capture:
+
+- user question
+- generated answer
+- intent
+- pipeline used
+- sources used
+- model used
+- timestamp
+- latency
+
+This is useful for enterprise-style traceability.
+
+---
+
+### 12. Answer Verifier
+
+An answer verifier layer has been added.
+
+It can check whether an answer looks acceptable or needs revision.
+
+This helps reduce weak answers and gives more visibility into answer quality.
+
+---
+
+### 13. Admin UI Improvements
+
+The admin UI has been restyled to match the main InfraRAG UI.
+
+Improvements include:
+
+- darker theme
+- similar font size
+- consistent text colour
+- cleaner layout
+- better alignment with the main app style
+
+---
+
+### 14. Cleaner Source and Upload UI
+
+The source filter and upload area has been simplified.
+
+Changes include:
+
+- fewer duplicate source controls
+- one-line source filter layout
+- equal-width source boxes
+- upload box aligned with the filters
+- removed unnecessary page up/down style clutter
+- cleaner layout for demo and daily use
+
+---
+
 ## High-Level Request Flow
 
-### Question answering flow
+### Question Answering Flow
 
-1. User opens the UI on port `8080`
-2. User types a question
-3. Frontend sends the request to `/api/ask`
-4. Nginx routes `/api/*` to the backend
-5. Backend creates an embedding for the query using Ollama
-6. Backend queries Qdrant for the most relevant chunks
-7. Backend builds a prompt using retrieved context
-8. Backend sends the prompt to Ollama chat model
-9. Ollama returns an answer
-10. Backend returns the answer plus citations
-11. Frontend displays the response
+```text
+User
+  |
+  v
+Frontend UI
+  |
+  v
+Nginx
+  |
+  v
+FastAPI Backend
+  |
+  v
+Intent Router
+  |
+  v
+RAG Orchestrator
+  |
+  +--> Query Embedding using Ollama / nomic-embed-text
+  |
+  +--> Qdrant Candidate Retrieval
+  |
+  +--> BGE Reranking
+  |
+  +--> Prompt Library
+  |
+  +--> Ollama / llama3.2:3b
+  |
+  +--> Answer Verifier
+  |
+  +--> Citation Formatter
+  |
+  +--> SQLite Audit Log
+  |
+  v
+Frontend Answer with Metadata, Latency, and Citations
+```
 
-### Ingestion flow
+---
 
-1. Raw files live under the local `docs/` folder
-2. You choose which files or folders to ingest
-3. Backend reads those files
-4. Files are chunked based on file structure where possible
-5. Each chunk is embedded with `nomic-embed-text`
-6. Embeddings plus metadata are stored in Qdrant
+## Ingestion Flow
+
+```text
+Files / Folders / Uploads / PDFs / Repos
+  |
+  v
+Parser
+  |
+  v
+Chunker
+  |
+  v
+Embedding Service
+  |
+  v
+Qdrant Vector Store
+  |
+  v
+SQLite Metadata Store
+```
 
 ---
 
 ## Project Structure
 
+Current project tree summary:
+
 ```text
 infrarag/
+├── architectural-diagram-infrarag.png
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
+│   ├── data/
 │   └── app/
 │       ├── main.py
+│       ├── router.py
+│       ├── rag_orchestrator.py
+│       ├── streaming_orchestrator.py
+│       ├── prompts.py
+│       ├── retrieve.py
+│       ├── reranker.py
+│       ├── response_formatter.py
+│       ├── answer_verifier.py
+│       ├── audit.py
+│       ├── chat_history.py
+│       ├── followup_resolver.py
+│       ├── query_planner.py
+│       ├── metadata_db.py
+│       ├── qdrant_client.py
+│       ├── embedding_service.py
+│       ├── uploads.py
+│       ├── pipeline.py
+│       ├── pipelines/
 │       ├── ingest.py
-│       └── retrieve.py
+│       ├── incremental_ingest.py
+│       ├── delete_sync.py
+│       ├── git_connector.py
+│       ├── pdf_parser.py
+│       ├── text_parser.py
+│       ├── text_chunker.py
+│       ├── code_parser.py
+│       ├── code_chunker.py
+│       ├── context_utils.py
+│       ├── cancel_registry.py
+│       ├── summary_jobs.py
+│       └── state_store.py
 ├── docs/
-│   ├── aws/
-│   ├── terraform/
-│   ├── devops/
-│   ├── repos/
-│   └── runbooks/
+│   ├── runbooks/
+│   └── uploads/
 ├── frontend/
-│   └── index.html
+│   ├── index.html
+│   └── admin.html
 ├── monitoring/
 │   ├── prometheus.yml
 │   └── grafana/
 ├── nginx/
 │   └── nginx.conf
-└── docker-compose.yml
-
+├── docker-compose.yml
+├── infrarag-screeshot.png
+└── readme.MD
 ```
 
-# How to start InfraRAG
+---
 
-```bash
-git clone https://github.com/ashroy6/infrarag.git
-cd infrarag
-docker compose up -d
-docker compose exec ollama ollama pull nomic-embed-text
-docker compose exec ollama ollama pull llama3.2:3b
-docker compose exec backend python app/ingest.py repos/ml_data_pipeline/src repos/ml_data_pipeline/README.md
+## Important Backend Files
 
-```
-## Then Open
-http://localhost:8080
+| File | Purpose |
+|---|---|
+| `main.py` | FastAPI entrypoint and API routes |
+| `router.py` | Decides which answer pipeline to use |
+| `rag_orchestrator.py` | Main controller for RAG answer flow |
+| `streaming_orchestrator.py` | Streaming answer support |
+| `prompts.py` | Central prompt library |
+| `retrieve.py` | Retrieval logic |
+| `reranker.py` | Local BGE reranking |
+| `response_formatter.py` | Formats final response and metadata |
+| `answer_verifier.py` | Checks whether answer needs revision |
+| `audit.py` | Saves audit events |
+| `chat_history.py` | Conversation and message handling |
+| `metadata_db.py` | SQLite metadata storage |
+| `qdrant_client.py` | Qdrant wrapper |
+| `embedding_service.py` | Embedding generation |
+| `uploads.py` | File and folder upload support |
+| `pipeline.py` | Ingestion pipeline |
+| `incremental_ingest.py` | Incremental ingestion support |
+| `delete_sync.py` | Delete/sync logic for sources |
+| `git_connector.py` | Git repository ingestion support |
+| `pdf_parser.py` | PDF parsing |
+| `text_parser.py` | Text and Markdown parsing |
+| `code_parser.py` | Code parsing |
+| `text_chunker.py` | Text chunking |
+| `code_chunker.py` | Code-aware chunking |
 
-# Folder Roles
+---
 
-## `backend/`
-
-Contains the application logic.
-
-### Main files
-- `main.py` exposes API routes such as:
-  - `/`
-  - `/health`
-  - `/retrieve`
-  - `/ask`
-  - `/metrics`
-
-- `ingest.py`
-  - Reads files from `docs/`
-  - Chunks them
-  - Embeds them
-  - Stores them in Qdrant
-
-- `retrieve.py`
-  - Embeds the query
-  - Searches Qdrant
-
-## `docs/`
-
-This is the raw knowledge source.
-
-### Examples
-- AWS docs repos
-- Terraform module docs
-- your own private GitHub repos
-- runbooks
-- CI/CD docs
-- internal notes
-
-## `frontend/`
-
-Simple web UI for asking questions.
-
-## `nginx/`
-
-Routes traffic:
-
-- `/` → frontend
-- `/api/*` → backend
-
-## `monitoring/`
-
-Contains Prometheus configuration and Grafana persistence.
-
-# Ports
+## Ports
 
 | Service | Port | Purpose |
 |---|---:|---|
@@ -201,218 +475,335 @@ Contains Prometheus configuration and Grafana persistence.
 | Backend API | 8000 | FastAPI backend |
 | Nginx app entry | 8080 | Main application URL |
 | Ollama host port | 11435 | Host access to Ollama container |
-| Qdrant | 6333 | Qdrant API |
+| Qdrant HTTP | 6333 | Qdrant API |
 | Qdrant gRPC | 6334 | Qdrant gRPC |
 | Prometheus | 9090 | Metrics UI |
 | Grafana | 3001 | Dashboard UI |
 
-## Main App URL
+---
 
+## Main URLs
+
+| URL | Purpose |
+|---|---|
+| `http://localhost:8080` | Main InfraRAG app |
+| `http://localhost:8080/admin.html` | Admin UI |
+| `http://localhost:9090` | Prometheus |
+| `http://localhost:3001` | Grafana |
+| `http://localhost:6333` | Qdrant API |
+
+---
+
+## How to Start InfraRAG
+
+```bash
+git clone https://github.com/ashroy6/infrarag.git
+cd infrarag
+docker compose up -d
+docker compose exec ollama ollama pull nomic-embed-text
+docker compose exec ollama ollama pull llama3.2:3b
+```
+
+Open the app:
+
+```text
 http://localhost:8080
+```
 
-# Models Used
+Open the admin page:
 
-## Embedding model
-`nomic-embed-text`
+```text
+http://localhost:8080/admin.html
+```
+
+---
+
+## Optional: Ingest Example Repo Files
+
+```bash
+docker compose exec backend python app/ingest.py repos/ml_data_pipeline/src repos/ml_data_pipeline/README.md
+```
+
+Use this only if those files exist inside your mounted `docs/` corpus.
+
+---
+
+## API Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /` | Backend status |
+| `GET /health` | Health check |
+| `GET /retrieve?q=...` | Retrieve chunks only |
+| `GET /ask?q=...` | Full RAG answer flow |
+| `GET /metrics` | Prometheus metrics |
+
+Depending on the current backend version, upload, admin, streaming, and chat endpoints may also be exposed from `main.py`.
+
+---
+
+## Models Used
+
+### Embedding Model
+
+```text
+nomic-embed-text
+```
 
 Used for:
-- embedding documents
-- embedding user queries
 
-## Chat model
-`llama3.2:3b`
+- document embeddings
+- query embeddings
+
+### Chat Model
+
+```text
+llama3.2:3b
+```
 
 Used for:
-- answering questions from retrieved context
 
-# Chunking Strategy
+- answering grounded questions
+- explaining documents
+- summarising content
+- repo and Terraform explanations
+
+### Reranker
+
+```text
+BGE reranker
+```
+
+Used for:
+
+- reranking retrieved chunks before they are sent to the LLM
+
+---
+
+## Chunking Strategy
 
 InfraRAG supports structure-aware chunking.
 
-## Markdown
-- chunked by headings where possible
+### Markdown
 
-## Terraform
-- chunked by top-level blocks such as:
-  - `resource`
-  - `module`
-  - `variable`
-  - `output`
-  - `data`
-  - `provider`
-  - `terraform`
+Chunked by headings where possible.
 
-## Python
-- chunked by function or class using Python AST
+### Terraform
 
-## YAML
-- chunked by logical top-level sections
+Chunked by logical Terraform blocks such as:
 
-## Fallback
-If a chunk becomes too large, the system falls back to fixed-size chunking.
+- `resource`
+- `module`
+- `variable`
+- `output`
+- `data`
+- `provider`
+- `terraform`
 
-This gives better retrieval quality than blindly splitting everything by character count.
+### Python
 
-# How Selective Ingestion Works
+Chunked by function or class where possible.
 
-InfraRAG does not need to ingest the whole `docs/` folder.
+### YAML
 
-You can ingest only selected files or directories by passing them to `ingest.py`.
+Chunked by logical top-level sections.
 
-## Example
-```bash
-docker compose exec backend python app/ingest.py repos/ml_data_pipeline/src repos/ml_data_pipeline/README.md
+### PDF
 
+Parsed page by page where possible, with metadata preserved for citations.
+
+### Fallback
+
+If structure-aware chunking is not possible, InfraRAG falls back to fixed-size chunking.
+
+---
+
+## Storage Model
+
+InfraRAG separates raw files, vector data, and metadata.
+
+| Storage | Purpose |
+|---|---|
+| `docs/` | Raw source knowledge |
+| `docs/uploads/` | Uploaded files |
+| Qdrant | Vector embeddings and searchable chunks |
+| SQLite | Source records, metadata, chat history, audit logs |
+| Docker volumes | Persistent container data |
+
+---
+
+## Qdrant Collection
+
+Default collection:
+
+```text
+infrarag_docs
 ```
 
-## How Ingested Data Is Stored
+Each vector point can include metadata such as:
 
-Raw files remain in the `docs/` folder.
-
-After ingestion, vectors are stored in Qdrant in the collection:
-
-`infrarag_docs`
-
-Each stored point includes metadata such as:
-- source file path
+- source path
+- source type
+- file type
+- parser type
 - chunk index
 - chunk text
-- file type
-- embedding vector
+- page number where available
 
-### Important distinction
-- `docs/` = raw source knowledge
-- `Qdrant` = vectorized searchable knowledge
+---
 
-## Example Commands
-
-### Start the stack
-```bash
-docker compose up -d
-
-```
 ## Example Questions
 
-Once ingestion is complete, you can ask questions like:
+After ingestion, you can ask:
 
 - What does this repo do?
-- How is `model.pkl` created?
-- Which workflow runs training?
-- What does `predict.py` do?
-- How is the CI pipeline structured?
-- What does this Terraform module create?
-- Which file defines outputs for this module?
-- What are the main steps in this README?
+- Explain this Terraform module.
+- Which file creates the S3 bucket?
+- What are the main steps in this runbook?
+- Summarise this uploaded PDF.
+- Explain this CI/CD workflow.
+- What caused this incident according to the runbook?
+- What does this Python pipeline do?
+- Which source supports this answer?
+
+---
 
 ## Monitoring
 
-InfraRAG includes basic monitoring support.
+InfraRAG includes monitoring through Prometheus and Grafana.
 
 ### Prometheus
 
 Prometheus scrapes backend metrics from:
 
-`/metrics`
+```text
+/metrics
+```
 
 Open Prometheus:
 
-`http://localhost:9090`
+```text
+http://localhost:9090
+```
 
 ### Grafana
 
 Open Grafana:
 
-`http://localhost:3001`
+```text
+http://localhost:3001
+```
 
-Default first login is commonly:
+Common first login:
 
-- username: `admin`
-- password: `admin`
+```text
+username: admin
+password: admin
+```
 
-Grafana can be connected to Prometheus as a data source to visualize:
+Grafana can be connected to Prometheus to visualise:
 
 - request counts
 - request latency
 - backend availability
-- API activity over time
+- API activity
+- ingestion activity
+- error trends
 
-
-## API Endpoints
-
-### `GET /`
-Returns a basic backend status message.
-
-### `GET /health`
-Health check endpoint.
-
-### `GET /retrieve?q=...`
-Returns retrieved chunks only.
-
-### `GET /ask?q=...`
-Runs the full RAG flow:
-
-- query embedding
-- vector search
-- prompt building
-- Ollama answer generation
-- citations
-
-### `GET /metrics`
-Prometheus metrics endpoint.
+---
 
 ## Current Strengths
 
-InfraRAG already demonstrates:
+InfraRAG now demonstrates:
 
-- local private RAG
-- Docker-based deployment
-- vector search with Qdrant
-- local embeddings and generation via Ollama
-- selective ingestion
-- structure-aware chunking
-- basic citations
-- frontend + backend separation
-- monitoring integration
+- private local RAG
+- local LLM inference with Ollama
+- local embeddings
+- Qdrant vector search
+- BGE reranking
+- intent routing
+- multiple answer pipelines
+- prompt library separation
+- answer verification
+- clickable citations
+- chat history
+- audit trail
+- file and folder upload support
+- PDF ingestion
+- Git/repo ingestion support
+- incremental ingestion support
+- delete/sync support
+- admin UI
+- monitoring with Prometheus and Grafana
+- Docker Compose deployment
+
+---
 
 ## Current Limitations
 
-Current MVP limitations include:
+Current limitations:
 
-- frontend is intentionally simple
 - no authentication yet
-- citations are basic
-- no reranking yet
-- no incremental file change detection yet
-- no ingestion scheduler yet
-- no advanced metadata filters yet
-- no role-based access yet
-- monitoring dashboards still need to be built in Grafana
-- very large corpora need better curation and tuning
+- no role-based access control yet
+- no production secret manager integration yet
+- Grafana dashboards still need more tuning
+- very large corpora need better indexing and tuning
+- streaming and cancellation should be tested heavily under long responses
+- answer verifier still needs more hardening
+- full CI/CD pipeline can be improved further
+- production deployment needs TLS, auth, backup, and access control
 
+---
+
+## Production Improvements To Add Next
+
+Recommended next improvements:
+
+1. Add authentication and user login
+2. Add role-based access control
+3. Add proper HTTPS/TLS
+4. Add backup and restore for Qdrant and SQLite
+5. Add stronger CI/CD tests
+6. Add Docker Compose smoke tests in GitHub Actions
+7. Add better Grafana dashboards
+8. Add ingestion queue and background jobs
+9. Add source deletion/rebuild from Admin UI
+10. Add model and retrieval evaluation tests
+11. Add confidence thresholds for `No evidence found`
+12. Add source-level access permissions
+13. Add deployment guide for VM or cloud server
+14. Add production secrets handling
+
+---
 
 ## Why This Project Matters
 
 InfraRAG is not just a chatbot.
 
-It demonstrates how to build a private engineering knowledge assistant that can operate over:
+It demonstrates how to build a private engineering knowledge assistant over:
 
 - code
 - runbooks
-- infrastructure docs
+- infrastructure documentation
 - Terraform modules
 - DevOps documentation
-- internal repos
+- CI/CD pipelines
+- PDFs
+- internal repositories
 
-This makes it a strong project for demonstrating:
+It encompasses the following:
 
 - DevOps engineering
 - platform engineering
 - AI infrastructure
-- RAG system design
-- containerized application architecture
-- local LLM integration
-- production-style system thinking
+- local LLM operations
+- retrieval-augmented generation
+- vector databases
+- observability
+- Docker-based deployment
+- auditability
+- enterprise-style architecture thinking
 
-## Screeshots
+---
 
-![InfraRAG Architecture](infrarag-screeshot.png)
+## Thanks
