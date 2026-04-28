@@ -583,6 +583,8 @@ docker compose exec backend python app/ingest.py repos/ml_data_pipeline/src repo
 
 Use this only if those files exist inside your mounted `docs/` corpus.
 
+### After cloning InfraRAG, each user must ingest their own files or upload documents through the UI. The GitHub repo contains the application code, not a prebuilt private knowledge base.
+
 ---
 
 ## API Endpoints
