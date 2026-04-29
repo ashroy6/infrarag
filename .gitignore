@@ -4,7 +4,7 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Git
+# Git / swap files
 *.swp
 *.swo
 
@@ -15,38 +15,54 @@ Thumbs.db
 
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 .venv/
 venv/
 
-# FastAPI / backend artifacts
+# FastAPI / backend runtime artifacts
 *.log
+backend/data/
+backend/app/__pycache__/
 
 # Node / frontend
 node_modules/
 dist/
 build/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
 
-# Docker
+# Docker / compose artifacts
 *.tar
 
 # Monitoring / runtime data
 prometheus_data/
 grafana_data/
+monitoring/prometheus_data/
+monitoring/grafana_data/
 
 # Vector DB / embeddings / local knowledge indexes
 qdrant_storage/
 chroma/
 vectorstore/
+*.sqlite
 *.sqlite3
+*.db
 
 # Uploaded/generated docs or temp data
 tmp/
 temp/
 *.tmp
+docs/uploads/
 
-# Mac/Linux misc
+# Backup files created during patching
 *.bak
+*.bak.*
+*.bak*
+*.backup*
