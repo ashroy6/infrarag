@@ -165,6 +165,12 @@ def should_verify_answer(
     answer: str = "",
     citations: list[dict[str, Any]] | None = None,
 ) -> bool:
+    # Normal Q&A must stay fast.
+    # Do not trigger verifier just because graph context adds more citations.
+    # Verifier remains enabled for complex pipelines only.
+    if pipeline_used == "normal_qa":
+        return False
+
     if not VERIFY_COMPLEX_ANSWERS:
         return False
 

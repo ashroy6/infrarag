@@ -5,6 +5,7 @@ from collections import defaultdict
 from typing import Any
 
 from app.embedding_service import get_embedding
+from app.graph_retrieval import expand_with_graph_context
 from app.qdrant_client import search
 from app.query_planner import plan_query
 from app.reranker import rerank_hits
@@ -328,6 +329,8 @@ def retrieve_context(
     page_start: int | None = None,
     page_end: int | None = None,
     retrieval_plan: dict[str, Any] | None = None,
+    use_graph_context: bool = False,
+    graph_max_chunks: int = 3,
 ) -> list[dict[str, Any]]:
     safe_limit = max(1, min(int(limit), 50))
 
@@ -399,4 +402,16 @@ def retrieve_context(
         strategy=source_strategy,
     )
 
-    return diversified[:safe_limit]
+    final_hits = diversified[:safe_limit]
+
+    if use_graph_context:
+        final_hits, graph_meta = expand_with_graph_context(
+            final_hits,
+            max_graph_chunks=graph_max_chunks,
+        )
+        for hit in final_hits:
+            hit.setdefault("graph_context_enabled", True)
+        if final_hits:
+            final_hits[0]["graph_context_meta"] = graph_meta
+
+    return final_hits

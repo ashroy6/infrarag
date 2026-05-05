@@ -257,6 +257,35 @@ def get_chunk_by_source_id_and_index(source_id: str, chunk_index: int) -> dict[s
 
     return _payload_to_hit(points[0])
 
+
+def get_chunks_by_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Fetches exact chunks by source_id + chunk_index.
+
+    Kept intentionally simple because graph context should only fetch a few chunks.
+    """
+    results: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+
+    for ref in refs:
+        source_id = str(ref.get("source_id") or "").strip()
+        try:
+            chunk_index = int(ref.get("chunk_index"))
+        except (TypeError, ValueError):
+            continue
+
+        key = (source_id, chunk_index)
+        if not source_id or chunk_index < 0 or key in seen:
+            continue
+
+        seen.add(key)
+        chunk = get_chunk_by_source_id_and_index(source_id, chunk_index)
+        if chunk:
+            results.append(chunk)
+
+    return results
+
+
 def delete_points_by_source_id(source_id: str) -> None:
     client = get_client()
 

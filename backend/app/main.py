@@ -421,6 +421,7 @@ def ask_stream(
     page_start: int | None = None,
     page_end: int | None = None,
     request_id: str | None = None,
+    use_graph_context: bool = False,
 ):
     if not q:
         raise InfraRAGError("query parameter 'q' is required", status_code=400, code="missing_query")
@@ -436,6 +437,7 @@ def ask_stream(
             page_start=page_start,
             page_end=page_end,
             request_id=request_id,
+            use_graph_context=use_graph_context,
         ),
         media_type="text/event-stream",
         headers={

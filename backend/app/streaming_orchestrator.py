@@ -368,6 +368,7 @@ def stream_ask_events(
     page_start: int | None = None,
     page_end: int | None = None,
     request_id: str | None = None,
+    use_graph_context: bool = False,
 ) -> Iterator[str]:
     started = time.perf_counter()
     request_id = register_request(request_id)
@@ -443,7 +444,9 @@ def stream_ask_events(
                 "router": routing.get("router"),
                 "question_type": routing.get("question_type"),
                 "source_strategy": routing.get("source_strategy"),
-                "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else "vector_search",
+                "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else ("vector_graph_search" if use_graph_context else "vector_search"),
+                "graph_context_enabled": bool(use_graph_context and not exact_file_mode),
+                "graph_chunks_added": 0,
                 "requested_file": requested_file,
                 "verification_verdict": "pending" if pipeline_used in {"long_explanation", "repo_explanation", "incident_runbook"} else "skipped",
                 "progress": 15,
@@ -513,6 +516,8 @@ def stream_ask_events(
                 page_start=page_start,
                 page_end=page_end,
                 retrieval_plan=retrieval_plan,
+                use_graph_context=bool(use_graph_context),
+                graph_max_chunks=3,
             )
 
         if cancelled():
@@ -556,6 +561,11 @@ def stream_ask_events(
                 },
             )
             return
+
+        graph_chunks_added = len([c for c in chunks if c.get("graph_context")])
+        graph_context_meta = {}
+        if chunks and isinstance(chunks[0].get("graph_context_meta"), dict):
+            graph_context_meta = chunks[0].get("graph_context_meta") or {}
 
         if not exact_file_mode:
             top_score = max(float(c.get("score", 0.0) or 0.0) for c in chunks)
@@ -619,6 +629,9 @@ def stream_ask_events(
                 "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
                 "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
                 "retrieved_chunks": len(compacted),
+                "graph_context_enabled": bool(use_graph_context and not exact_file_mode),
+                "graph_chunks_added": graph_chunks_added if not exact_file_mode else 0,
+                "graph_reason": graph_context_meta.get("graph_reason", ""),
             },
         )
 

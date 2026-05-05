@@ -434,6 +434,231 @@ class GraphStore:
 
         return self._format_graph(node_rows=node_rows, edge_rows=edge_rows, mode=mode)
 
+
+    def get_related_chunk_refs(
+        self,
+        seed_chunks: list[dict[str, Any]],
+        allowed_edges: tuple[str, ...] = ("mentions", "defines", "contains"),
+        max_refs: int = 9,
+    ) -> list[dict[str, Any]]:
+        """
+        Finds chunk nodes related to seed chunk nodes through safe graph edges.
+
+        Strategy:
+        seed chunk -> connector node -> related chunk
+
+        Connector can be concept/service/resource/symbol/section/file depending on edge type.
+        Results are capped and deduped. This is used for graph-assisted RAG context.
+        """
+        safe_max_refs = max(1, min(int(max_refs or 9), 30))
+        clean_edges = tuple(edge for edge in allowed_edges if edge)
+        if not clean_edges:
+            return []
+
+        clean_seeds: list[tuple[str, int]] = []
+        for seed in seed_chunks:
+            source_id = str(seed.get("source_id") or "").strip()
+            try:
+                chunk_index = int(seed.get("chunk_index"))
+            except (TypeError, ValueError):
+                continue
+
+            if source_id and chunk_index >= 0:
+                clean_seeds.append((source_id, chunk_index))
+
+        if not clean_seeds:
+            return []
+
+        with self._connect() as conn:
+            seed_node_rows = []
+            for source_id, chunk_index in clean_seeds:
+                row = conn.execute(
+                    """
+                    SELECT node_id, source_id, chunk_index, label
+                    FROM graph_nodes
+                    WHERE source_id = ?
+                      AND node_type = 'chunk'
+                      AND chunk_index = ?
+                    LIMIT 1
+                    """,
+                    (source_id, chunk_index),
+                ).fetchone()
+                if row:
+                    seed_node_rows.append(row)
+
+            if not seed_node_rows:
+                return []
+
+            seed_node_ids = [row["node_id"] for row in seed_node_rows]
+            seed_node_id_set = set(seed_node_ids)
+
+            edge_placeholders = ",".join("?" for _ in clean_edges)
+            seed_placeholders = ",".join("?" for _ in seed_node_ids)
+
+            first_hop_edges = conn.execute(
+                f"""
+                SELECT *
+                FROM graph_edges
+                WHERE edge_type IN ({edge_placeholders})
+                  AND (
+                    source_node_id IN ({seed_placeholders})
+                    OR target_node_id IN ({seed_placeholders})
+                  )
+                LIMIT ?
+                """,
+                list(clean_edges) + seed_node_ids + seed_node_ids + [safe_max_refs * 10],
+            ).fetchall()
+
+            connector_ids: set[str] = set()
+            connector_reason: dict[str, dict[str, Any]] = {}
+
+            for edge in first_hop_edges:
+                source_node_id = edge["source_node_id"]
+                target_node_id = edge["target_node_id"]
+
+                other_id = target_node_id if source_node_id in seed_node_id_set else source_node_id
+                if other_id in seed_node_id_set:
+                    continue
+
+                connector_ids.add(other_id)
+                connector_reason.setdefault(
+                    other_id,
+                    {
+                        "edge_type": edge["edge_type"],
+                        "weight": float(edge["weight"] or 1.0),
+                    },
+                )
+
+            if not connector_ids:
+                return []
+
+            connector_placeholders = ",".join("?" for _ in connector_ids)
+            connector_rows = conn.execute(
+                f"""
+                SELECT node_id, node_type, label
+                FROM graph_nodes
+                WHERE node_id IN ({connector_placeholders})
+                """,
+                list(connector_ids),
+            ).fetchall()
+
+            connector_labels = {
+                row["node_id"]: {
+                    "node_type": row["node_type"],
+                    "label": row["label"],
+                }
+                for row in connector_rows
+            }
+
+            second_hop_edges = conn.execute(
+                f"""
+                SELECT *
+                FROM graph_edges
+                WHERE edge_type IN ({edge_placeholders})
+                  AND (
+                    source_node_id IN ({connector_placeholders})
+                    OR target_node_id IN ({connector_placeholders})
+                  )
+                LIMIT ?
+                """,
+                list(clean_edges) + list(connector_ids) + list(connector_ids) + [safe_max_refs * 20],
+            ).fetchall()
+
+            candidate_chunk_ids: set[str] = set()
+            candidate_meta: dict[str, dict[str, Any]] = {}
+
+            for edge in second_hop_edges:
+                source_node_id = edge["source_node_id"]
+                target_node_id = edge["target_node_id"]
+
+                if source_node_id in connector_ids:
+                    candidate_id = target_node_id
+                    connector_id = source_node_id
+                elif target_node_id in connector_ids:
+                    candidate_id = source_node_id
+                    connector_id = target_node_id
+                else:
+                    continue
+
+                if candidate_id in seed_node_id_set:
+                    continue
+
+                candidate_chunk_ids.add(candidate_id)
+
+                connector_info = connector_labels.get(connector_id, {})
+                candidate_meta.setdefault(
+                    candidate_id,
+                    {
+                        "edge_type": edge["edge_type"],
+                        "connector_id": connector_id,
+                        "connector_label": connector_info.get("label", ""),
+                        "connector_type": connector_info.get("node_type", ""),
+                        "weight": float(edge["weight"] or 1.0),
+                    },
+                )
+
+            if not candidate_chunk_ids:
+                return []
+
+            candidate_placeholders = ",".join("?" for _ in candidate_chunk_ids)
+            candidate_rows = conn.execute(
+                f"""
+                SELECT node_id, source_id, chunk_index, label, source_path
+                FROM graph_nodes
+                WHERE node_id IN ({candidate_placeholders})
+                  AND node_type = 'chunk'
+                  AND source_id IS NOT NULL
+                  AND chunk_index IS NOT NULL
+                """,
+                list(candidate_chunk_ids),
+            ).fetchall()
+
+        results: list[dict[str, Any]] = []
+        seen: set[tuple[str, int]] = set()
+
+        edge_rank = {
+            "defines": 4,
+            "mentions": 3,
+            "contains": 2,
+            "related_to": 1,
+            "next": 0,
+        }
+
+        for row in candidate_rows:
+            source_id = str(row["source_id"] or "")
+            try:
+                chunk_index = int(row["chunk_index"])
+            except (TypeError, ValueError):
+                continue
+
+            key = (source_id, chunk_index)
+            if key in seen:
+                continue
+
+            meta = candidate_meta.get(row["node_id"], {})
+            edge_type = str(meta.get("edge_type") or "")
+            connector_label = str(meta.get("connector_label") or "")
+
+            seen.add(key)
+            results.append(
+                {
+                    "source_id": source_id,
+                    "chunk_index": chunk_index,
+                    "source_path": row["source_path"],
+                    "edge_type": edge_type,
+                    "connector_label": connector_label,
+                    "connector_type": meta.get("connector_type", ""),
+                    "reason": (
+                        f"Related through {edge_type}"
+                        + (f" via {connector_label}" if connector_label else "")
+                    ),
+                    "rank": edge_rank.get(edge_type, 0) + float(meta.get("weight") or 1.0),
+                }
+            )
+
+        results.sort(key=lambda item: item.get("rank", 0), reverse=True)
+        return results[:safe_max_refs]
+
     def _format_graph(
         self,
         node_rows: list[sqlite3.Row],

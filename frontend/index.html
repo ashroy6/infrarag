@@ -863,6 +863,14 @@
           </div>
 
           <div id="sourceSummary" class="source-summary">Loading sources...</div>
+
+          <div class="row" style="margin-top:8px;">
+            <label class="inline-check" title="Adds 2-3 graph-neighbour chunks from the Knowledge Graph. Slower but may improve multi-hop answers.">
+              <input id="graphContextToggle" type="checkbox" />
+              Use Graph Context
+            </label>
+            <span class="source-summary">Adds related graph chunks from Page 3 Knowledge Graph. Default OFF for speed.</span>
+          </div>
         </div>
 
         <div id="uploadPanel" class="upload-panel">
@@ -1140,6 +1148,7 @@
                   <div><strong>Planner confidence:</strong> ${escapeHtml(meta.intent_confidence ?? "n/a")}</div>
                   <div><strong>Router:</strong> ${escapeHtml(meta.router ?? "n/a")}</div>
                   <div><strong>Verifier:</strong> ${escapeHtml(meta.verification_verdict ?? "n/a")}</div>
+                  <div><strong>Graph:</strong> ${meta.graph_context_enabled ? `ON (${escapeHtml(meta.graph_chunks_added ?? 0)})` : "OFF"}</div>
                   <div><strong>Latency:</strong> ${escapeHtml(meta.latency_display || (meta.latency_ms ? `${Math.round(Number(meta.latency_ms) / 1000)}s` : "n/a"))}</div>
                 </div>
                 <div style="margin-top:6px;"><strong>Reason:</strong> ${escapeHtml(meta.intent_reason || "n/a")}</div>
@@ -1561,6 +1570,7 @@
       const q = input.value.trim();
 
       const sourceId = document.getElementById("sourceSelect").value.trim();
+      const useGraphContext = Boolean(document.getElementById("graphContextToggle")?.checked);
       const pageStart = "";
       const pageEnd = "";
 
@@ -1581,6 +1591,8 @@
           latency_ms: "",
           latency_display: "0s",
           verification_verdict: "n/a",
+          graph_context_enabled: useGraphContext,
+          graph_chunks_added: 0,
           progress: 5,
           progress_label: "Starting...",
         }
@@ -1594,6 +1606,7 @@
 
       if (currentConversationId) params.set("conversation_id", currentConversationId);
       if (sourceId) params.set("source_id", sourceId);
+      if (useGraphContext) params.set("use_graph_context", "true");
       if (pageStart) params.set("page_start", pageStart);
       if (pageEnd) params.set("page_end", pageEnd);
 
@@ -1627,6 +1640,8 @@
             latency_ms: "",
             latency_display: meta.latency_display || "0s",
             verification_verdict: data.verification_verdict || "pending",
+            graph_context_enabled: Boolean(data.graph_context_enabled),
+            graph_chunks_added: data.graph_chunks_added ?? 0,
             progress: data.progress ?? 15,
             progress_label: data.progress_label || "Searching evidence.",
           };
@@ -1639,6 +1654,8 @@
           citations = Array.isArray(data.citations) ? data.citations : [];
           meta.progress = data.progress ?? 35;
           meta.progress_label = data.progress_label || "Evidence found. Generating answer.";
+          meta.graph_context_enabled = Boolean(data.graph_context_enabled ?? meta.graph_context_enabled);
+          meta.graph_chunks_added = data.graph_chunks_added ?? meta.graph_chunks_added ?? 0;
           updateLastAssistant(answer || "Evidence found. Generating answer...", { meta, citations });
         });
 
