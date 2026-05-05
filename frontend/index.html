@@ -919,6 +919,9 @@
 
   <script>
     const RECENT_SOURCE_LIMIT = 20;
+    const CHAT_UI_STATE_KEY = "infrarag_chat_ui_state_v1";
+    const QUESTION_DRAFT_KEY = "infrarag_question_draft_v1";
+    const CHAT_UI_STATE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
     let allSources = [];
     let conversations = [];
@@ -931,6 +934,145 @@
     let stopRequested = false;
     let activeLatencyTimer = null;
     let activeLatencyStartedAt = null;
+
+    function safeJsonParse(value, fallback = null) {
+      try {
+        return value ? JSON.parse(value) : fallback;
+      } catch {
+        return fallback;
+      }
+    }
+
+    function persistChatState() {
+      try {
+        const sourceSelect = document.getElementById("sourceSelect");
+        const graphToggle = document.getElementById("graphContextToggle");
+
+        const state = {
+          saved_at: Date.now(),
+          currentConversationId,
+          messages: Array.isArray(messages) ? messages.slice(-50) : [],
+          source_id: sourceSelect ? sourceSelect.value : "",
+          graph_context_enabled: graphToggle ? Boolean(graphToggle.checked) : false,
+        };
+
+        localStorage.setItem(CHAT_UI_STATE_KEY, JSON.stringify(state));
+      } catch (err) {
+        console.warn("Failed to persist chat UI state:", err);
+      }
+    }
+
+    function restoreChatState() {
+      const state = safeJsonParse(localStorage.getItem(CHAT_UI_STATE_KEY), null);
+
+      if (!state || typeof state !== "object") {
+        return false;
+      }
+
+      const savedAt = Number(state.saved_at || 0);
+      if (savedAt && Date.now() - savedAt > CHAT_UI_STATE_MAX_AGE_MS) {
+        localStorage.removeItem(CHAT_UI_STATE_KEY);
+        return false;
+      }
+
+      currentConversationId = state.currentConversationId || null;
+      messages = Array.isArray(state.messages) ? state.messages : [];
+
+      // If the browser left/reloaded during SSE streaming, the live stream is gone.
+      // Do not restore a fake in-progress "Routing/Search/Generating" state forever.
+      const last = messages[messages.length - 1];
+      if (last && last.role === "assistant") {
+        const content = String(last.content || "");
+        const progress = Number(last.meta?.progress || 0);
+        const looksIncomplete =
+          progress < 100 ||
+          content.includes("Routing question") ||
+          content.includes("Searching sources") ||
+          content.includes("Evidence found. Generating answer") ||
+          content.includes("Thinking...");
+
+        if (looksIncomplete) {
+          last.content = "Request was interrupted because you left or reloaded the Chat page. Ask again to restart.";
+          last.citations = [];
+          last.meta = {
+            ...(last.meta || {}),
+            pipeline_label: "Interrupted",
+            verification_verdict: "interrupted",
+            progress: 100,
+            progress_label: "Interrupted.",
+            latency_display: "n/a",
+          };
+        }
+      }
+
+      const graphToggle = document.getElementById("graphContextToggle");
+      if (graphToggle) {
+        graphToggle.checked = Boolean(state.graph_context_enabled);
+      }
+
+      renderMessages();
+      return messages.length > 0;
+    }
+
+    function restoreSourceSelection() {
+      const state = safeJsonParse(localStorage.getItem(CHAT_UI_STATE_KEY), null);
+      if (!state || !state.source_id) return;
+
+      const sourceSelect = document.getElementById("sourceSelect");
+      if (!sourceSelect) return;
+
+      const exists = Array.from(sourceSelect.options).some(option => option.value === state.source_id);
+      if (exists) {
+        sourceSelect.value = state.source_id;
+      }
+    }
+
+    function clearChatState() {
+      localStorage.removeItem(CHAT_UI_STATE_KEY);
+    }
+
+    function saveQuestionDraft() {
+      const input = document.getElementById("question");
+      if (!input) return;
+
+      localStorage.setItem(QUESTION_DRAFT_KEY, input.value || "");
+    }
+
+    function restoreQuestionDraft() {
+      const input = document.getElementById("question");
+      if (!input) return;
+
+      const draft = localStorage.getItem(QUESTION_DRAFT_KEY) || "";
+      if (draft && !input.value) {
+        input.value = draft;
+      }
+    }
+
+    function clearQuestionDraft() {
+      localStorage.removeItem(QUESTION_DRAFT_KEY);
+    }
+
+    function bindStatePersistenceEvents() {
+      const input = document.getElementById("question");
+      if (input) {
+        input.addEventListener("input", saveQuestionDraft);
+      }
+
+      const graphToggle = document.getElementById("graphContextToggle");
+      if (graphToggle) {
+        graphToggle.addEventListener("change", persistChatState);
+      }
+
+      const sourceSelect = document.getElementById("sourceSelect");
+      if (sourceSelect) {
+        sourceSelect.addEventListener("change", persistChatState);
+      }
+
+      window.addEventListener("beforeunload", () => {
+        saveQuestionDraft();
+        persistChatState();
+      });
+    }
 
     function applySidebarState() {
       const app = document.querySelector(".app");
@@ -1121,6 +1263,7 @@
             <p>Ask about uploaded books, DevOps docs, Terraform repos, incidents, or summaries. The backend decides the best pipeline automatically.</p>
           </div>
         `;
+        persistChatState();
         return;
       }
 
@@ -1208,6 +1351,7 @@
       }).join("");
 
       container.scrollTop = container.scrollHeight;
+      persistChatState();
     }
 
     function addLocalMessage(role, content, extra = {}) {
@@ -1245,6 +1389,8 @@
     function newChat() {
       currentConversationId = null;
       messages = [];
+      clearChatState();
+      clearQuestionDraft();
       renderMessages();
       renderConversationList();
       document.getElementById("question").focus();
@@ -1297,6 +1443,7 @@
         });
 
         renderMessages();
+        persistChatState();
       } catch (err) {
         addLocalMessage("assistant", "Failed to load conversation: " + err.message);
       }
@@ -1579,6 +1726,7 @@
       startAskButton();
       startLatencyTimer();
       input.value = "";
+      clearQuestionDraft();
 
       addLocalMessage("user", q);
       addLocalMessage("assistant", "Routing question...", {
@@ -1600,6 +1748,7 @@
 
       const params = new URLSearchParams();
       activeRequestId = generateRequestId();
+      persistChatState();
 
       params.set("q", q);
       params.set("request_id", activeRequestId);
@@ -1766,6 +1915,7 @@
           eventSource.close();
           activeEventSource = null;
           await loadConversations();
+          persistChatState();
           finishAskButton();
         });
 
@@ -2002,9 +2152,20 @@
       }
     }
 
-    applySidebarState();
-    loadSources();
-    loadConversations();
+    async function initApp() {
+      applySidebarState();
+      bindStatePersistenceEvents();
+      restoreChatState();
+      restoreQuestionDraft();
+
+      await loadSources();
+      restoreSourceSelection();
+
+      await loadConversations();
+      renderConversationList();
+    }
+
+    initApp();
   </script>
 </body>
 </html>
