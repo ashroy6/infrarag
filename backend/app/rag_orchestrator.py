@@ -15,6 +15,14 @@ from app.chat_history import (
 from app.llm_client import CHAT_MODEL
 from app.followup_resolver import resolve_followup_question
 from app.router import decide_intent
+from app.rag_metrics import (
+    RAG_ANSWER_LATENCY_SECONDS,
+    RAG_NO_EVIDENCE_TOTAL,
+    RAG_PIPELINE_TOTAL,
+    RAG_PLANNER_FALLBACK_TOTAL,
+    RAG_QUESTIONS_TOTAL,
+    RAG_VERIFIER_TOTAL,
+)
 
 from app.pipelines import document_summary
 from app.pipelines import incident_runbook
@@ -92,6 +100,9 @@ def run_ask(
     routing["followup_reason"] = followup.get("reason", "")
 
     selected_pipeline = routing.get("pipeline_used", "normal_qa")
+    RAG_PIPELINE_TOTAL.labels(pipeline=selected_pipeline).inc()
+    if str(routing.get("router") or "") == "planner_fallback":
+        RAG_PLANNER_FALLBACK_TOTAL.labels(reason="planner_fallback").inc()
 
     result = _run_selected_pipeline(
         pipeline_used=selected_pipeline,
@@ -109,6 +120,7 @@ def run_ask(
     citations = result.get("citations", [])
 
     if answer.strip() == "No evidence found in the knowledge base.":
+        RAG_NO_EVIDENCE_TOTAL.labels(pipeline=selected_pipeline).inc()
         citations = []
 
     verification_result: dict[str, Any] = {
@@ -148,6 +160,10 @@ def run_ask(
         )
 
         verifier_verdict = verification_result.get("verification_verdict")
+        RAG_VERIFIER_TOTAL.labels(
+            pipeline=selected_pipeline,
+            verdict=str(verifier_verdict or "unknown"),
+        ).inc()
 
         # Important:
         # If verifier says the draft is valid, keep the original detailed draft.
@@ -166,7 +182,10 @@ def run_ask(
         pipeline_used=selected_pipeline,
     )
 
-    latency_ms = int((time.perf_counter() - started) * 1000)
+    latency_seconds = time.perf_counter() - started
+    latency_ms = int(latency_seconds * 1000)
+    RAG_QUESTIONS_TOTAL.labels(pipeline=selected_pipeline, status="success").inc()
+    RAG_ANSWER_LATENCY_SECONDS.labels(pipeline=selected_pipeline, status="success").observe(latency_seconds)
 
     audit_id = save_audit_event(
         conversation_id=resolved_conversation_id,

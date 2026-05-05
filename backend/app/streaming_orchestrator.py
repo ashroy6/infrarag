@@ -28,6 +28,17 @@ from app.prompts import (
     REPO_EXPLANATION_PROMPT,
 )
 from app.qdrant_client import get_chunks_by_source_id
+from app.rag_metrics import (
+    RAG_ANSWER_LATENCY_SECONDS,
+    RAG_GRAPH_CHUNKS_ADDED_TOTAL,
+    RAG_GRAPH_CONTEXT_ENABLED_TOTAL,
+    RAG_NO_EVIDENCE_TOTAL,
+    RAG_OLLAMA_TIMEOUT_TOTAL,
+    RAG_PIPELINE_TOTAL,
+    RAG_PLANNER_FALLBACK_TOTAL,
+    RAG_QUESTIONS_TOTAL,
+    RAG_VERIFIER_TOTAL,
+)
 from app.response_formatter import no_evidence_response
 from app.retrieve import retrieve_context
 from app.router import decide_intent
@@ -416,6 +427,14 @@ def stream_ask_events(
         routing["followup_reason"] = followup.get("reason", "")
 
         pipeline_used = routing.get("pipeline_used", "normal_qa")
+        RAG_PIPELINE_TOTAL.labels(pipeline=pipeline_used).inc()
+
+        router_name = str(routing.get("router") or "")
+        route_reason = str(routing.get("reason") or "")
+        if router_name == "planner_fallback":
+            RAG_PLANNER_FALLBACK_TOTAL.labels(reason="planner_fallback").inc()
+        if "timeout" in route_reason.lower() or "timed out" in route_reason.lower():
+            RAG_OLLAMA_TIMEOUT_TOTAL.labels(stage="planner").inc()
         requested_file = _extract_requested_file(effective_question)
         exact_file_mode = (
             pipeline_used == "repo_explanation"
@@ -525,6 +544,7 @@ def stream_ask_events(
             return
 
         if not chunks:
+            RAG_NO_EVIDENCE_TOTAL.labels(pipeline=pipeline_used).inc()
             answer = no_evidence_response()["answer"]
             citations: list[dict[str, Any]] = []
 
@@ -563,6 +583,10 @@ def stream_ask_events(
             return
 
         graph_chunks_added = len([c for c in chunks if c.get("graph_context")])
+        if use_graph_context and not exact_file_mode:
+            RAG_GRAPH_CONTEXT_ENABLED_TOTAL.labels(pipeline=pipeline_used).inc()
+            if graph_chunks_added > 0:
+                RAG_GRAPH_CHUNKS_ADDED_TOTAL.labels(pipeline=pipeline_used).inc(graph_chunks_added)
         graph_context_meta = {}
         if chunks and isinstance(chunks[0].get("graph_context_meta"), dict):
             graph_context_meta = chunks[0].get("graph_context_meta") or {}
@@ -570,6 +594,7 @@ def stream_ask_events(
         if not exact_file_mode:
             top_score = max(float(c.get("score", 0.0) or 0.0) for c in chunks)
             if top_score < MIN_SCORE_THRESHOLD:
+                RAG_NO_EVIDENCE_TOTAL.labels(pipeline=pipeline_used).inc()
                 answer = "No evidence found in the knowledge base."
                 citations = []
 
@@ -709,6 +734,10 @@ def stream_ask_events(
                 return
 
             verifier_verdict = verification_result.get("verification_verdict")
+            RAG_VERIFIER_TOTAL.labels(
+                pipeline=pipeline_used,
+                verdict=str(verifier_verdict or "unknown"),
+            ).inc()
 
             if verifier_verdict in {"needs_revision", "insufficient_evidence"}:
                 corrected_answer = verification_result.get("corrected_answer", answer)
@@ -743,7 +772,10 @@ def stream_ask_events(
             pipeline_used=pipeline_used,
         )
 
-        latency_ms = int((time.perf_counter() - started) * 1000)
+        latency_seconds = time.perf_counter() - started
+        latency_ms = int(latency_seconds * 1000)
+        RAG_QUESTIONS_TOTAL.labels(pipeline=pipeline_used, status="success").inc()
+        RAG_ANSWER_LATENCY_SECONDS.labels(pipeline=pipeline_used, status="success").observe(latency_seconds)
         audit_id = save_audit_event(
             conversation_id=resolved_conversation_id,
             question=normalized_question,
@@ -777,6 +809,12 @@ def stream_ask_events(
         )
 
     except Exception as exc:
-        yield _sse("error", {"message": str(exc), "request_id": request_id})
+        error_text = str(exc)
+        metric_pipeline = locals().get("pipeline_used", "unknown")
+        RAG_QUESTIONS_TOTAL.labels(pipeline=metric_pipeline, status="error").inc()
+        RAG_ANSWER_LATENCY_SECONDS.labels(pipeline=metric_pipeline, status="error").observe(time.perf_counter() - started)
+        if "timeout" in error_text.lower() or "timed out" in error_text.lower():
+            RAG_OLLAMA_TIMEOUT_TOTAL.labels(stage="answer_generation").inc()
+        yield _sse("error", {"message": error_text, "request_id": request_id})
     finally:
         unregister_request(request_id)
