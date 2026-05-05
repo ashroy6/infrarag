@@ -382,7 +382,9 @@
 
   <div class="topbar">
     <a href="/">Back to Main UI</a>
+    <a href="/graph.html">Open Graph UI</a>
     <button onclick="loadAll()">Refresh</button>
+    <button class="secondary" onclick="rebuildGraphAll()">Rebuild Graph for All Sources</button>
   </div>
 
   <div class="card">
@@ -687,6 +689,46 @@
 
     function closeChunksModal() {
       document.getElementById("chunksModalBackdrop").classList.remove("open");
+    }
+
+
+    async function rebuildGraphAll() {
+      const ok = confirm(
+        "Rebuild graph data for all active sources?\n\n" +
+        "This does not re-embed files and does not re-upload anything.\n" +
+        "It rebuilds graph_nodes and graph_edges from existing Qdrant chunks."
+      );
+
+      if (!ok) return;
+
+      setMessage("Rebuilding graph for all active sources...");
+
+      try {
+        const res = await fetch("/api/graph/rebuild?limit=500", {
+          method: "POST"
+        });
+
+        const data = await parseApiResponse(res);
+
+        const rebuilt = Array.isArray(data.rebuilt) ? data.rebuilt : [];
+        const skipped = Array.isArray(data.skipped) ? data.skipped : [];
+        const stats = data.stats || {};
+
+        setMessage(
+          "Graph rebuild complete.\n\n" +
+          "Rebuilt sources: " + (data.rebuilt_count ?? rebuilt.length) + "\n" +
+          "Skipped sources: " + (data.skipped_count ?? skipped.length) + "\n" +
+          "Total graph nodes: " + (stats.nodes ?? 0) + "\n" +
+          "Total graph edges: " + (stats.edges ?? 0) + "\n" +
+          "Graph sources: " + (stats.sources ?? 0) + "\n\n" +
+          JSON.stringify(data, null, 2)
+        );
+
+        await loadStats();
+        await loadSources();
+      } catch (err) {
+        setMessage("Graph rebuild failed: " + err.message);
+      }
     }
 
     async function loadAll() {

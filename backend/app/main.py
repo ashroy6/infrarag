@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from app.git_connector import clone_or_pull_repo
+from app.graph_api import router as graph_router
 from app.metadata_db import MetadataDB
 from app.pipeline import ingest_paths
 from app.qdrant_client import delete_points_by_source_id
@@ -44,6 +45,7 @@ MAX_TOTAL_CONTEXT_CHARS = int(os.getenv("MAX_TOTAL_CONTEXT_CHARS", "3200"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "140"))
 
 app = FastAPI(title="InfraRAG Backend", version="2.7.1")
+app.include_router(graph_router)
 
 REQUEST_COUNT = Counter("infrarag_requests_total", "Total API requests", ["method", "endpoint", "status"])
 REQUEST_LATENCY = Histogram("infrarag_request_latency_seconds", "Request latency", ["endpoint"])
