@@ -118,7 +118,23 @@ def run_ask(
         "verified": False,
     }
 
-    if should_verify_answer(
+    # Exact file/code explanation already retrieves one specific file by source_id.
+    # Verification adds large latency and little value for this narrow case.
+    # Keep verifier enabled for repo-level, long explanation, incident, and normal higher-risk answers.
+    skip_verifier = (
+        selected_pipeline == "repo_explanation"
+        and result.get("retrieval_mode") == "exact_file_source_id_lookup"
+    )
+
+    if skip_verifier:
+        verification_result = {
+            "verification_verdict": "skipped",
+            "unsupported_claims": [],
+            "verification_reason": "Verifier skipped for exact file/code explanation.",
+            "verified": False,
+        }
+
+    if (not skip_verifier) and should_verify_answer(
         pipeline_used=selected_pipeline,
         routing=routing,
         answer=answer,

@@ -56,6 +56,7 @@ Repo/code explanation examples:
 - "Explain this code block" -> repo_explanation
 - "Explain this module structure" -> repo_explanation
 - "Explain this deployment workflow file" -> repo_explanation
+- "Explain this source file line by line" -> repo_explanation
 
 Normal QA concept examples:
 - "Where is Terraform state stored?" -> normal_qa
@@ -189,6 +190,50 @@ Return only the answer text.
 """.strip()
 
 
+CODE_FILE_EXPLANATION_PROMPT = """
+You are InfraRAG, a private DevOps and code explanation assistant.
+
+The user asked about ONE specific source file or code file.
+
+Use ONLY the retrieved file context.
+Do not invent facts.
+Do not use general knowledge.
+Do not explain the whole repository.
+Do not explain README files, Docker, GitHub Actions, CI/CD, Terraform, architecture, dependencies, deployment flow, or project structure unless those details are explicitly present in the retrieved file context.
+
+Critical rules:
+- Explain only the requested file.
+- Preserve source order.
+- If the user asks "line by line", explain each visible line or small adjacent block in order.
+- If line numbers are not present in the retrieved context, do not invent exact line numbers.
+- Do not say the file contains imports, constants, dependencies, or functions unless they are visible in the retrieved context.
+- Do not mention missing repo files.
+- If retrieved chunks appear incomplete, say which part is missing.
+- If the retrieved context contains only chunks from the middle of a file, explain only those chunks and say the beginning or ending is not visible.
+- Do not use the repo-explanation format.
+- Do not include sections about architecture, Terraform, CI/CD, dependencies, or deployment unless the requested file itself contains those details.
+
+Required format:
+1. File being explained
+2. What this file does
+3. Line-by-line / block-by-block explanation
+4. Important behaviour in the code
+5. Risks or improvements visible in this file
+6. Short final summary
+
+Question:
+{question}
+
+Recent conversation context:
+{chat_context}
+
+Retrieved file context:
+{context_text}
+
+Return only the answer text.
+""".strip()
+
+
 DOCUMENT_SUMMARY_MAP_PROMPT = """
 You are extracting evidence-backed atomic facts from part of a larger document.
 
@@ -305,6 +350,8 @@ Strict rules:
 - Do not mention resources, variables, modules, commands, workflows, or dependencies unless they appear in the retrieved context.
 - Do not infer a full repository tree from one code snippet.
 - Keep the explanation tied to the cited evidence.
+- This prompt is for repo/project/codebase/configuration explanation.
+- If the user asks about one exact source file line by line, the application should use CODE_FILE_EXPLANATION_PROMPT instead of this prompt.
 
 Required format:
 1. What the retrieved context shows
@@ -358,6 +405,7 @@ Retrieved Context:
 
 Return only the answer text.
 """.strip()
+
 
 VERIFIER_PROMPT = """
 You are the answer verification and correction layer for InfraRAG.
