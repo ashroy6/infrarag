@@ -1117,22 +1117,46 @@ Each vector point can include metadata such as:
 
 After ingestion, you can ask:
 
-- Who is Mira?
-- Tell me the story in which Mira is a part of.
-- Elaborate the above.
-- What certifications are listed in this CV?
-- Tell me about Ashish's experience at Allwyn from the CV.
-- What are the names of the GitHub repositories in this CV?
-- What does this repo do?
-- Explain this Terraform module.
-- Which file creates the S3 bucket?
-- What are the main steps in this runbook?
+### Document and Profile Questions
+
+- What is this document about?
 - Summarise this uploaded PDF.
 - Summarise this uploaded DOCX.
-- Explain this CI/CD workflow.
-- What caused this incident according to the runbook?
-- What does this Python pipeline do?
+- What are the key points in this profile?
+- What certifications are listed in this document?
+- What experience is mentioned in this CV or resume?
+- Which projects are mentioned in this profile?
 - Which source supports this answer?
+
+### Repository and Code Questions
+
+- What does this repo do?
+- Explain this project structure.
+- Explain this Python file.
+- Explain this Terraform module.
+- Which file defines this resource?
+- Which file creates this infrastructure component?
+- Explain this CI/CD workflow.
+- What does this deployment script do?
+
+### DevOps, Cloud, and Runbook Questions
+
+- What are the main steps in this runbook?
+- What caused this incident according to the runbook?
+- What should I check first for this error?
+- What rollback path is described in this document?
+- Which AWS services are mentioned in this source?
+- What monitoring or observability steps are described?
+
+### Story, Book, and Long Document Questions
+
+- Who is the main character in this story?
+- What is the story about?
+- Summarise chapter 1.
+- Explain the main theme of this document.
+- Elaborate the previous answer.
+- Explain point 2 in detail.
+
 
 ---
 
