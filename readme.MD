@@ -35,30 +35,32 @@ It is designed as a production-style private AI assistant that can ingest engine
    - [17. Duplicate Upload Handling](#17-duplicate-upload-handling)
    - [18. Cancellation Support](#18-cancellation-support)
    - [19. Prometheus and Grafana Observability](#19-prometheus-and-grafana-observability)
-10. [High-Level Request Flow](#high-level-request-flow)
-11. [Question Answering Flow](#question-answering-flow)
-12. [Ingestion Flow](#ingestion-flow)
-13. [Knowledge Graph Flow](#knowledge-graph-flow)
-14. [Project Structure](#project-structure)
-15. [Important Backend Files](#important-backend-files)
-16. [Supported File Types](#supported-file-types)
-17. [Ports](#ports)
-18. [Main URLs](#main-urls)
-19. [How to Start InfraRAG](#how-to-start-infrarag)
-20. [Optional: Ingest Example Repo Files](#optional-ingest-example-repo-files)
-21. [API Endpoints](#api-endpoints)
-22. [Models Used](#models-used)
-23. [Key Runtime Parameters](#key-runtime-parameters)
-24. [Chunking Strategy](#chunking-strategy)
-25. [Storage Model](#storage-model)
-26. [Qdrant Collection](#qdrant-collection)
-27. [Example Questions](#example-questions)
-28. [Monitoring](#monitoring)
-29. [Current Strengths](#current-strengths)
-30. [Current Limitations](#current-limitations)
-31. [Production Improvements To Add Next](#production-improvements-to-add-next)
-32. [Why This Project Matters](#why-this-project-matters)
-33. [Thanks](#thanks)
+   - [20. Async Ingestion Jobs and Large File Support](#20-async-ingestion-jobs-and-large-file-support)
+   - [21. Ingestion Progress, Cancel, Retry, and Build Graph Controls](#21-ingestion-progress-cancel-retry-and-build-graph-controls)
+9. [High-Level Request Flow](#high-level-request-flow)
+10. [Question Answering Flow](#question-answering-flow)
+11. [Ingestion Flow](#ingestion-flow)
+12. [Knowledge Graph Flow](#knowledge-graph-flow)
+13. [Project Structure](#project-structure)
+14. [Important Backend Files](#important-backend-files)
+15. [Supported File Types](#supported-file-types)
+16. [Ports](#ports)
+17. [Main URLs](#main-urls)
+18. [How to Start InfraRAG](#how-to-start-infrarag)
+19. [Optional: Ingest Example Repo Files](#optional-ingest-example-repo-files)
+20. [API Endpoints](#api-endpoints)
+21. [Models Used](#models-used)
+22. [Key Runtime Parameters](#key-runtime-parameters)
+23. [Chunking Strategy](#chunking-strategy)
+24. [Storage Model](#storage-model)
+25. [Qdrant Collection](#qdrant-collection)
+26. [Example Questions](#example-questions)
+27. [Monitoring](#monitoring)
+28. [Current Strengths](#current-strengths)
+29. [Current Limitations](#current-limitations)
+30. [Production Improvements To Add Next](#production-improvements-to-add-next)
+31. [Why This Project Matters](#why-this-project-matters)
+32. [Thanks](#thanks)
 
 ---
 
@@ -87,10 +89,15 @@ InfraRAG turns private engineering knowledge into a searchable local AI assistan
 It can:
 
 - ingest uploaded files, folders, local paths, Git repositories, PDFs, DOCX files, Markdown, text files, code, Terraform, YAML, JSON, CSV, SQL, logs, and runbooks
+- accept uploads quickly by creating background ingestion jobs instead of blocking the browser request
+- show ingestion status, stage, processed units, total units, and completion percentage in the UI
+- cancel queued/running ingestion jobs and retry failed/cancelled ingestion jobs
 - parse and chunk documents using structure-aware chunking where possible
+- use adaptive large-file chunking for large `.txt` files such as books and manuals
 - generate embeddings locally using Ollama and `nomic-embed-text`
+- write vectors to Qdrant in batches for large ingestion jobs
 - store vectors and metadata in Qdrant
-- store source metadata, chunks, conversations, audit logs, and graph data in SQLite
+- store source metadata, ingestion jobs, chunks, conversations, audit logs, and graph data in SQLite
 - retrieve the most relevant chunks for a user question
 - rerank retrieved chunks using a local BGE reranker
 - route questions automatically to the correct answer pipeline
@@ -102,6 +109,7 @@ It can:
 - keep chat history in a ChatGPT-style interface
 - support request cancellation from the UI
 - build a local knowledge graph for ingested sources
+- defer graph build for large sources so vector RAG becomes usable first
 - show graph nodes and relationships in a dedicated Graph UI
 - expose infrastructure and RAG metrics through Prometheus and Grafana
 
@@ -137,6 +145,7 @@ InfraRAG is useful for:
 | Vector Database | Qdrant |
 | Reranker | Local BGE reranker |
 | Persistent Metadata | SQLite |
+| Ingestion Jobs | SQLite-backed job table + in-process background worker |
 | Graph Store | SQLite graph tables |
 | Reverse Proxy | Nginx |
 | Metrics | Prometheus |
@@ -331,7 +340,7 @@ SQLite stores:
 
 - source metadata
 - uploaded file records
-- ingestion status
+- ingestion job status and progress
 - chunk metadata
 - chat conversations
 - chat messages
@@ -402,6 +411,14 @@ It supports:
 - re-ingest source
 - upload visibility
 - dark theme aligned with the main app
+- ingestion status panel
+- ingestion progress percentage
+- current ingestion stage
+- processed/total unit counts
+- Refresh
+- Cancel Ingestion
+- Retry Failed
+- Build Graph
 
 ---
 
@@ -454,9 +471,9 @@ Current graph behavior is mainly for observability, trust, debugging, and knowle
 
 ### 15. Automatic Graph Build on Ingest
 
-InfraRAG now builds graph data during ingestion.
+InfraRAG builds graph data during ingestion for normal-sized sources.
 
-When a new or changed file is ingested:
+When a new or changed small/medium file is ingested:
 
 ```text
 parse file
@@ -468,7 +485,16 @@ parse file
 → save graph rows to SQLite
 ```
 
-This means the Graph UI should show graph data immediately after ingestion without manually clicking "Rebuild Graph for All Sources".
+For large sources, graph build is deferred:
+
+```text
+large source
+→ vector ingestion first
+→ source becomes searchable
+→ graph can be built later from Admin UI
+```
+
+This avoids blocking large file ingestion on graph extraction.
 
 Duplicate uploads are also handled better. If a duplicate upload is detected, InfraRAG can check the existing source and build graph data for that existing source if graph data is missing or stale.
 
@@ -507,13 +533,17 @@ duplicate upload found
 
 This avoids creating repeated source entries while still fixing missing graph rows for existing uploads.
 
+The ingestion job layer also tries to prevent duplicate active jobs for the same source path and worker type.
+
 ---
 
 ### 18. Cancellation Support
 
-The UI supports cancelling active generation.
+The UI supports cancelling active answer generation and ingestion jobs.
 
-The backend uses a cancel registry to stop long-running requests where possible.
+For answer generation, the backend uses a cancel registry to stop long-running requests where possible.
+
+For ingestion, the Admin UI can mark a queued/running ingestion job as cancelled. The ingestion loop checks cancellation between chunks and cleans partial Qdrant vectors for the source where possible.
 
 Cancellation is useful for:
 
@@ -522,6 +552,8 @@ Cancellation is useful for:
 - document summary jobs
 - accidental large prompts
 - wrong source selection
+- accidental large file ingestion
+- duplicate ingestion jobs
 
 ---
 
@@ -550,6 +582,152 @@ Grafana has an InfraRAG Overview dashboard with:
 - average RAG answer latency by pipeline
 
 This makes the app easier to demonstrate as a production-style AI/DevOps system.
+
+---
+
+### 20. Async Ingestion Jobs and Large File Support
+
+InfraRAG now supports background ingestion jobs.
+
+Previously, file upload and ingestion happened inside the same HTTP request:
+
+```text
+upload file
+→ save file
+→ parse
+→ chunk
+→ embed
+→ write to Qdrant
+→ save SQLite metadata
+→ build graph
+→ return response
+```
+
+That worked for small files, but large files such as full books could block the backend, freeze the Admin UI, or cause Nginx `502 API upstream unavailable` errors.
+
+The new ingestion flow is:
+
+```text
+upload file
+→ save file quickly
+→ create ingestion job
+→ return job_id immediately
+→ background worker performs ingestion
+→ UI polls job status
+```
+
+This means the app can accept a large file upload without blocking Chat/Admin while indexing continues in the background.
+
+InfraRAG now tracks ingestion jobs in SQLite through the `ingestion_jobs` table.
+
+Job states include:
+
+- `queued`
+- `running`
+- `done`
+- `failed`
+- `cancelled`
+
+Large `.txt` files now use adaptive chunking.
+
+Current large text rule:
+
+```text
+if .txt file >= 1 MB:
+    chunk_size = 5000 characters
+    overlap = 500 characters
+else:
+    use default chunking
+```
+
+This avoids creating thousands of tiny chunks for large books such as `bible.txt`.
+
+Current ingestion plan:
+
+| File size/type | Ingestion behavior | Chunking | Graph behavior |
+|---|---|---|---|
+| Small files | Background job, normal ingestion | 1200 chars / 150 overlap | Graph builds inline |
+| Medium files | Background job with progress | Usually 1200 chars / 150 overlap | Graph builds inline if chunk count is below threshold |
+| Large `.txt` files | Background job with adaptive chunking | 5000 chars / 500 overlap | Graph build deferred if too large |
+| Large PDFs/DOCX | Background job, parser-specific chunking | Existing PDF/DOCX logic | Graph build deferred if too large |
+| Folder uploads | One background job for folder | Per-file rules | Per-file rules |
+
+Large-file vector ingestion is prioritised first. Graph build is treated as an enrichment step and can be run later.
+
+---
+
+### 21. Ingestion Progress, Cancel, Retry, and Build Graph Controls
+
+The Admin UI now includes ingestion job controls.
+
+New Admin UI controls:
+
+- Refresh
+- Cancel Ingestion
+- Retry Failed
+- Build Graph
+
+The ingestion status panel shows:
+
+- job status
+- current stage
+- progress percentage
+- processed units
+- total units
+- error message if failed
+- graph result when available
+
+Example status:
+
+```text
+running 35%
+Stage: embedding:bible.txt
+Progress: 340 / 967
+```
+
+The backend now saves ingestion progress fields:
+
+- `stage`
+- `total_units`
+- `processed_units`
+- `progress_percent`
+- `heartbeat_at`
+
+The main Chat upload panel was also changed so it no longer says "Upload complete" immediately. Upload completion and indexing completion are now separated.
+
+Correct behavior:
+
+```text
+Upload accepted: bible.txt. Indexing started in background...
+Indexing running: embedding:bible.txt 340/967 35%
+Indexing completed. Chunks: 967
+```
+
+Cancellation behavior:
+
+```text
+Cancel Ingestion
+→ job status becomes cancelled
+→ running loop detects cancellation between chunks
+→ partial Qdrant vectors for that source are cleaned up
+```
+
+Retry behavior:
+
+```text
+Retry Failed
+→ creates a new ingestion job using the same saved file path
+→ background worker starts again
+```
+
+Build Graph behavior:
+
+```text
+Build Graph
+→ builds graph rows for an already ingested source
+```
+
+For very large files, graph build should eventually become its own background graph job. Current graph build button is useful, but large graph builds may still take time.
 
 ---
 
@@ -649,8 +827,25 @@ Show answer + citations
 
 ## Ingestion Flow
 
+InfraRAG now uses asynchronous background ingestion.
+
 ```text
 Files / Folders / Uploads / PDFs / DOCX / Repos
+  |
+  v
+Upload / Ingest API
+  |
+  v
+Save file or resolve path
+  |
+  v
+Create ingestion job in SQLite
+  |
+  v
+Return job_id immediately
+  |
+  v
+Background Ingestion Worker
   |
   v
 File Discovery
@@ -659,23 +854,38 @@ File Discovery
 Parser
   |
   v
-Chunker
+Adaptive Chunker
   |
   v
 Embedding Service
   |
   v
-Qdrant Vector Store
+Partial Qdrant Upserts
   |
   v
-SQLite Metadata Store
+SQLite Metadata + Chunk Records
   |
-  v
-Graph Extractor
+  +--> Small source: build graph inline
   |
-  v
-SQLite Graph Store
+  +--> Large source: defer graph build
 ```
+
+The UI polls the ingestion job and shows:
+
+```text
+queued → running → done / failed / cancelled
+```
+
+For large files, the UI also shows:
+
+```text
+stage
+processed_units
+total_units
+progress_percent
+```
+
+Large `.txt` files use larger chunks to avoid excessive embedding calls.
 
 ---
 
@@ -704,6 +914,8 @@ Graph API
   v
 Graph UI with Cytoscape.js
 ```
+
+For large files, graph build can be deferred so vector RAG is available first. The Admin UI can trigger `Build Graph` later for a selected source.
 
 ---
 
@@ -738,6 +950,8 @@ infrarag/
 │       ├── pipeline.py
 │       ├── pipelines/
 │       ├── ingest.py
+│       ├── ingestion_jobs.py
+│       ├── ingestion_progress.py
 │       ├── incremental_ingest.py
 │       ├── delete_sync.py
 │       ├── git_connector.py
@@ -794,11 +1008,13 @@ infrarag/
 | `answer_verifier.py` | Verifies and repairs unsupported or false-denial answers |
 | `audit.py` | Saves audit events |
 | `chat_history.py` | Conversation and message handling |
-| `metadata_db.py` | SQLite metadata, files, chunks, audit, and history storage |
+| `metadata_db.py` | SQLite metadata, files, ingestion jobs, chunks, audit, and history storage |
 | `qdrant_client.py` | Qdrant wrapper |
 | `embedding_service.py` | Embedding generation |
 | `uploads.py` | File and folder upload support |
-| `pipeline.py` | Ingestion pipeline |
+| `pipeline.py` | Ingestion pipeline, adaptive chunking, partial Qdrant upserts, graph deferral |
+| `ingestion_jobs.py` | Background ingestion job lifecycle, retry, cancel, startup recovery |
+| `ingestion_progress.py` | Ingestion progress tracking, percentage updates, and cancellation checks |
 | `incremental_ingest.py` | Incremental ingestion support |
 | `delete_sync.py` | Delete/sync logic for local and Git sources |
 | `git_connector.py` | Git repository ingestion support |
@@ -931,11 +1147,15 @@ Use this only if those files exist inside your mounted `docs/` corpus.
 | `GET /retrieve?q=...` | Retrieve chunks only |
 | `GET /ask?q=...` | Non-streaming RAG answer flow |
 | `GET /ask-stream?q=...` | Streaming RAG answer flow |
-| `POST /cancel` | Cancel active request |
-| `POST /upload` | Upload and ingest one file |
-| `POST /upload-folder` | Upload and ingest folder |
-| `POST /ingest/local` | Ingest local path |
+| `POST /cancel` | Cancel active answer-generation request |
+| `POST /upload` | Upload one file and create background ingestion job |
+| `POST /upload-folder` | Upload folder and create background ingestion job |
+| `POST /ingest/local` | Create background ingestion job for local path |
 | `POST /ingest/git` | Clone/pull and ingest Git repo |
+| `GET /ingestion-jobs` | List ingestion jobs |
+| `GET /ingestion-jobs/{job_id}` | Get ingestion job status and progress |
+| `POST /ingestion-jobs/{job_id}/cancel` | Cancel queued/running ingestion job |
+| `POST /ingestion-jobs/{job_id}/retry` | Retry failed/cancelled ingestion job |
 | `GET /citation` | Retrieve exact citation evidence |
 | `GET /conversations` | List conversations |
 | `GET /conversations/{id}/messages` | Get conversation messages |
@@ -944,8 +1164,9 @@ Use this only if those files exist inside your mounted `docs/` corpus.
 | `GET /admin/stats` | Admin stats |
 | `GET /admin/sources` | List sources |
 | `GET /admin/chunks` | List chunks for a source |
-| `POST /admin/reingest` | Re-ingest source |
+| `POST /admin/reingest` | Re-ingest source through background ingestion job |
 | `DELETE /admin/source` | Delete source |
+| `POST /admin/source/{source_id}/build-graph` | Build graph for an already ingested source |
 | `GET /graph/stats` | Graph stats |
 | `GET /graph` | Graph data |
 | `GET /graph/source/{source_id}` | Graph data for one source |
@@ -1029,6 +1250,12 @@ Important parameters are configured through `docker-compose.yml` environment var
 | `MIN_SCORE_THRESHOLD` | Minimum retrieval confidence threshold |
 | `MAX_CONTEXT_CHARS_PER_CHUNK` | Per-chunk context cap |
 | `MAX_TOTAL_CONTEXT_CHARS` | Total context cap |
+| `MAX_INGEST_WORKERS` | Number of background ingestion workers, default `1` |
+| `LARGE_TEXT_THRESHOLD_BYTES` | File size threshold for large `.txt` adaptive chunking, default `1000000` |
+| `LARGE_TEXT_CHUNK_SIZE` | Large `.txt` chunk size, default `5000` characters |
+| `LARGE_TEXT_CHUNK_OVERLAP` | Large `.txt` chunk overlap, default `500` characters |
+| `QDRANT_UPSERT_BATCH_SIZE` | Number of vectors written to Qdrant per batch, default `100` |
+| `GRAPH_BUILD_MAX_CHUNKS_INLINE` | Max chunks allowed for inline graph build, default `500` |
 
 ---
 
@@ -1072,6 +1299,35 @@ Parsed from Word document body text into chunkable text.
 
 If structure-aware chunking is not possible, InfraRAG falls back to fixed-size chunking.
 
+Default fallback chunking:
+
+```text
+chunk_size = 1200 characters
+overlap = 150 characters
+```
+
+### Large Text Files
+
+Large `.txt` files use adaptive chunking.
+
+Current rule:
+
+```text
+if .txt file size >= 1 MB:
+    chunk_size = 5000 characters
+    overlap = 500 characters
+```
+
+This is important for books and large text files because small chunks can create thousands of embedding calls and make ingestion too slow.
+
+Example:
+
+```text
+bible.txt
+→ large text rule
+→ around 900–1200 larger chunks instead of several thousand tiny chunks
+```
+
 ---
 
 ## Storage Model
@@ -1084,7 +1340,7 @@ InfraRAG separates raw files, vector data, metadata, graph data, and runtime log
 | `/app/data/uploads` | Uploaded files inside backend data volume |
 | `/app/data/repos` | Cloned Git repositories |
 | Qdrant | Vector embeddings and searchable chunks |
-| SQLite | Source records, chunk metadata, chat history, audit logs, graph data |
+| SQLite | Source records, ingestion jobs, progress status, chunk metadata, chat history, audit logs, graph data |
 | Docker volumes | Persistent container data |
 | Prometheus volume/config | Metrics scraping |
 | Grafana volume/config | Dashboards and visualisation |
@@ -1110,6 +1366,7 @@ Each vector point can include metadata such as:
 - chunk text
 - page number where available
 - page range where available
+- tenant/source-group/agent metadata where enabled
 
 ---
 
@@ -1156,7 +1413,6 @@ After ingestion, you can ask:
 - Explain the main theme of this document.
 - Elaborate the previous answer.
 - Explain point 2 in detail.
-
 
 ---
 
@@ -1235,6 +1491,14 @@ InfraRAG now demonstrates:
 - chat history
 - audit trail
 - file and folder upload support
+- asynchronous background ingestion jobs
+- ingestion progress tracking with percentage, stage, processed units, and total units
+- cancel ingestion support
+- retry failed ingestion support
+- large `.txt` adaptive chunking
+- partial Qdrant upserts for large ingestion jobs
+- graph build deferral for large sources
+- Admin UI controls for Refresh, Cancel Ingestion, Retry Failed, and Build Graph
 - PDF ingestion
 - DOCX ingestion
 - Git/repo ingestion support
@@ -1244,7 +1508,8 @@ InfraRAG now demonstrates:
 - Admin UI
 - Graph UI
 - SQLite-backed knowledge graph
-- automatic graph build on ingest
+- automatic graph build on ingest for smaller sources
+- build-graph-later flow for large sources
 - optional graph context expansion
 - Prometheus metrics
 - Grafana dashboard
@@ -1264,7 +1529,10 @@ Current limitations:
 - `.doc` legacy Word files are not supported directly
 - scanned/image-only PDFs need OCR before ingestion
 - PowerPoint and Excel ingestion are not supported yet
-- very large corpora need better indexing, batching, and queue management
+- very large corpora now have background ingestion and adaptive chunking, but still need stronger production queue management
+- the current ingestion worker is still in-process inside FastAPI, not a dedicated queue worker
+- graph build for very large sources should become a separate background graph job
+- ingestion progress exists, but deeper per-file/per-stage telemetry can still improve
 - some secondary LLM paths such as verifier/recovery may still appear after the first streamed draft
 - answer quality gates need more formal tests
 - graph-assisted retrieval is still early and optional
@@ -1288,7 +1556,7 @@ Recommended next improvements:
 8. Add answer-quality gates for too-short long explanations
 9. Add story/book neighboring-chunk retrieval
 10. Add better Graph-RAG retrieval using graph relationships
-11. Add ingestion queue and background jobs
+11. Replace in-process ingestion worker with a stronger persistent queue such as Celery, RQ, Dramatiq, or Arq
 12. Add source deletion/rebuild from Admin UI
 13. Add model and retrieval evaluation tests
 14. Add confidence thresholds for `No evidence found`
@@ -1298,6 +1566,11 @@ Recommended next improvements:
 18. Add OCR support for scanned PDFs
 19. Add PowerPoint and Excel ingestion
 20. Add admin page for re-indexing, graph rebuilds, and corpus health
+21. Add dedicated background graph build jobs
+22. Add uploaded raw-file cleanup controls
+23. Add ingestion job history cleanup
+24. Add ingestion regression tests for large files such as books/manuals
+25. Add source table columns for Vector Status and Graph Status
 
 ---
 
@@ -1330,6 +1603,7 @@ It brings together:
 - knowledge graphs
 - observability
 - Docker-based deployment
+- background job processing
 - auditability
 - enterprise-style architecture thinking
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from app.embedding_service import get_embedding
 from app.graph_extractor import build_graph_for_file
 from app.graph_store import GraphStore
 from app.incremental_ingest import collect_changed_files
+from app.ingestion_progress import is_ingestion_cancelled, update_ingestion_progress
 from app.metadata_db import MetadataDB
 from app.pdf_parser import parse_pdf_file, supports as supports_pdf
 from app.qdrant_client import (
@@ -28,6 +30,13 @@ from app.text_chunker import chunk_markdown, chunk_yaml, fixed_chunk_text
 from app.text_parser import parse_text_file, supports as supports_text
 
 logger = logging.getLogger(__name__)
+
+LARGE_TEXT_THRESHOLD_BYTES = int(os.getenv("LARGE_TEXT_THRESHOLD_BYTES", "1000000"))
+LARGE_TEXT_CHUNK_SIZE = int(os.getenv("LARGE_TEXT_CHUNK_SIZE", "5000"))
+LARGE_TEXT_CHUNK_OVERLAP = int(os.getenv("LARGE_TEXT_CHUNK_OVERLAP", "500"))
+QDRANT_UPSERT_BATCH_SIZE = int(os.getenv("QDRANT_UPSERT_BATCH_SIZE", "100"))
+GRAPH_BUILD_MAX_CHUNKS_INLINE = int(os.getenv("GRAPH_BUILD_MAX_CHUNKS_INLINE", "500"))
+
 
 SUPPORTED_GENERIC_EXTENSIONS = {
     ".md",
@@ -203,6 +212,14 @@ def chunk_parsed_content(parsed: dict[str, Any]) -> list[dict[str, Any]]:
         chunks = _clean_chunks(chunk_terraform(text))
     elif parser_type == "code":
         chunks = _clean_chunks(chunk_generic_code(text))
+    elif file_type == ".txt" and len(text.encode("utf-8", errors="ignore")) >= LARGE_TEXT_THRESHOLD_BYTES:
+        chunks = _clean_chunks(
+            fixed_chunk_text(
+                text,
+                chunk_size=LARGE_TEXT_CHUNK_SIZE,
+                overlap=LARGE_TEXT_CHUNK_OVERLAP,
+            )
+        )
     else:
         chunks = _clean_chunks(fixed_chunk_text(text))
 
@@ -391,7 +408,16 @@ def ingest_paths(
         knowledge_source_id=knowledge_source_id,
     )
 
+    update_ingestion_progress(stage="discovering_files", total_units=0, processed_units=0, progress_percent=2)
+
     all_files = discover_files(paths)
+
+    update_ingestion_progress(
+        stage="files_discovered",
+        total_units=len(all_files),
+        processed_units=0,
+        progress_percent=5,
+    )
 
     deleted = []
     if should_run_delete_sync(source_type):
@@ -435,7 +461,17 @@ def ingest_paths(
     graph_built: list[dict[str, Any]] = []
     graph_failed: list[dict[str, str]] = []
 
-    for item in changed_files:
+    update_ingestion_progress(
+        stage="ingesting_files",
+        total_units=len(changed_files),
+        processed_units=0,
+        progress_percent=8,
+    )
+
+    for file_number, item in enumerate(changed_files, start=1):
+        if is_ingestion_cancelled():
+            raise RuntimeError("Ingestion cancelled")
+
         file_path = item["path"]
         source_id = item["source_id"]
         file_hash = item["file_hash"]
@@ -488,8 +524,30 @@ def ingest_paths(
                     duplicate_files.append(duplicate_info)
                     continue
 
+            update_ingestion_progress(
+                stage=f"parsing:{Path(file_path).name}",
+                total_units=len(changed_files),
+                processed_units=file_number - 1,
+                progress_percent=10,
+            )
+
             parsed = parse_file(file_path)
+
+            update_ingestion_progress(
+                stage=f"chunking:{Path(file_path).name}",
+                total_units=len(changed_files),
+                processed_units=file_number - 1,
+                progress_percent=12,
+            )
+
             chunks = chunk_parsed_content(parsed)
+
+            update_ingestion_progress(
+                stage=f"embedding:{Path(file_path).name}",
+                total_units=len(chunks),
+                processed_units=0,
+                progress_percent=15,
+            )
 
             if not chunks:
                 logger.warning("Skipping file with no chunkable content: %s", file_path)
@@ -503,10 +561,15 @@ def ingest_paths(
 
             delete_points_by_source_id(source_id)
 
-            points: list[PointStruct] = []
+            points_batch: list[PointStruct] = []
             chunk_records: list[dict[str, Any]] = []
+            total_points = 0
+            total_chunks_for_file = len(chunks)
 
             for idx, chunk_info in enumerate(chunks):
+                if is_ingestion_cancelled():
+                    raise RuntimeError("Ingestion cancelled")
+
                 chunk_text = (chunk_info.get("text") or "").strip()
                 if not chunk_text:
                     continue
@@ -546,13 +609,14 @@ def ingest_paths(
                 if chunk_info.get("page_end") is not None:
                     payload["page_end"] = chunk_info["page_end"]
 
-                points.append(
+                points_batch.append(
                     PointStruct(
                         id=point_id,
                         vector=embedding,
                         payload=payload,
                     )
                 )
+                total_points += 1
 
                 preview_prefix = ""
                 if chunk_info.get("page_number") is not None:
@@ -567,7 +631,26 @@ def ingest_paths(
                     }
                 )
 
-            if not points:
+                if total_points % 25 == 0 or total_points == total_chunks_for_file:
+                    progress = 15 + ((total_points / max(total_chunks_for_file, 1)) * 65)
+                    update_ingestion_progress(
+                        stage=f"embedding:{Path(file_path).name}",
+                        total_units=total_chunks_for_file,
+                        processed_units=total_points,
+                        progress_percent=progress,
+                    )
+
+                if len(points_batch) >= QDRANT_UPSERT_BATCH_SIZE:
+                    update_ingestion_progress(
+                        stage=f"qdrant_upsert:{Path(file_path).name}",
+                        total_units=total_chunks_for_file,
+                        processed_units=total_points,
+                        progress_percent=min(85, 15 + ((total_points / max(total_chunks_for_file, 1)) * 65)),
+                    )
+                    client.upsert(collection_name=QDRANT_COLLECTION, points=points_batch)
+                    points_batch = []
+
+            if not chunk_records:
                 failed_files.append(
                     {
                         "path": file_path,
@@ -576,7 +659,22 @@ def ingest_paths(
                 )
                 continue
 
-            client.upsert(collection_name=QDRANT_COLLECTION, points=points)
+            if points_batch:
+                update_ingestion_progress(
+                    stage=f"qdrant_upsert:{Path(file_path).name}",
+                    total_units=total_chunks_for_file,
+                    processed_units=total_points,
+                    progress_percent=85,
+                )
+                client.upsert(collection_name=QDRANT_COLLECTION, points=points_batch)
+                points_batch = []
+
+            update_ingestion_progress(
+                stage=f"saving_metadata:{Path(file_path).name}",
+                total_units=total_chunks_for_file,
+                processed_units=total_points,
+                progress_percent=88,
+            )
 
             metadata_db.upsert_file(
                 source_id=source_id,
@@ -585,7 +683,7 @@ def ingest_paths(
                 file_hash=file_hash,
                 file_type=parsed.get("file_type", ""),
                 parser_type=parsed.get("parser_type", ""),
-                chunk_count=len(points),
+                chunk_count=total_points,
                 status="active",
                 tenant_id=ingest_metadata["tenant_id"],
                 owner_user_id=ingest_metadata["owner_user_id"],
@@ -604,34 +702,64 @@ def ingest_paths(
             )
             metadata_db.replace_chunks(source_id=source_id, chunk_records=chunk_records)
 
-            try:
-                graph_result = build_and_save_graph_for_ingested_file(
-                    source_id=source_id,
-                    source_type=source_type,
-                    source_path=file_path,
-                    parsed=parsed,
-                    chunk_records=chunk_records,
-                    chunks=chunks,
-                )
-                graph_result["source_group"] = ingest_metadata["source_group"]
-                graph_result["data_domain"] = ingest_metadata["data_domain"]
-                graph_result["agent_access_enabled"] = ingest_metadata["agent_access_enabled"]
-                graph_built.append(graph_result)
-            except Exception as graph_exc:
-                logger.exception("Failed to build graph for file: %s", file_path)
-                graph_failed.append(
+            if total_points > GRAPH_BUILD_MAX_CHUNKS_INLINE:
+                graph_built.append(
                     {
-                        "path": file_path,
                         "source_id": source_id,
-                        "error": str(graph_exc),
+                        "source_path": file_path,
+                        "chunks": total_points,
+                        "nodes": 0,
+                        "edges": 0,
+                        "status": "skipped_large_file_build_later",
+                        "reason": f"chunk_count>{GRAPH_BUILD_MAX_CHUNKS_INLINE}",
                     }
                 )
+            else:
+                try:
+                    update_ingestion_progress(
+                        stage=f"building_graph:{Path(file_path).name}",
+                        total_units=total_chunks_for_file,
+                        processed_units=total_points,
+                        progress_percent=92,
+                    )
+                    graph_result = build_and_save_graph_for_ingested_file(
+                        source_id=source_id,
+                        source_type=source_type,
+                        source_path=file_path,
+                        parsed=parsed,
+                        chunk_records=chunk_records,
+                        chunks=chunks,
+                    )
+                    graph_result["source_group"] = ingest_metadata["source_group"]
+                    graph_result["data_domain"] = ingest_metadata["data_domain"]
+                    graph_result["agent_access_enabled"] = ingest_metadata["agent_access_enabled"]
+                    graph_built.append(graph_result)
+                except Exception as graph_exc:
+                    logger.exception("Failed to build graph for file: %s", file_path)
+                    graph_failed.append(
+                        {
+                            "path": file_path,
+                            "source_id": source_id,
+                            "error": str(graph_exc),
+                        }
+                    )
 
             total_files += 1
-            total_chunks += len(points)
+            total_chunks += total_points
+
+            update_ingestion_progress(
+                stage=f"file_complete:{Path(file_path).name}",
+                total_units=len(changed_files),
+                processed_units=file_number,
+                progress_percent=95,
+            )
 
         except Exception as exc:
             logger.exception("Failed to ingest file: %s", file_path)
+            try:
+                delete_points_by_source_id(source_id)
+            except Exception:
+                logger.exception("Failed to clean partial vectors for failed file: %s", file_path)
             failed_files.append(
                 {
                     "path": file_path,

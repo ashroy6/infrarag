@@ -2001,6 +2001,67 @@
       document.getElementById("uploadPanel").classList.toggle("open");
     }
 
+
+    async function pollUploadIngestionJob(jobId, statusElement, label) {
+      if (!jobId || !statusElement) return;
+
+      let attempts = 0;
+      const maxAttempts = 720; // 720 * 5s = 60 minutes
+
+      while (attempts < maxAttempts) {
+        attempts += 1;
+
+        try {
+          const res = await fetch(`/api/ingestion-jobs/${encodeURIComponent(jobId)}`, {
+            method: "GET",
+            cache: "no-store"
+          });
+
+          const data = await parseApiResponse(res);
+          const job = data.job || {};
+          const status = String(job.status || "unknown").toLowerCase();
+          const stage = job.stage || status;
+          const percent = Math.round(Number(job.progress_percent || 0));
+          const processed = Number(job.processed_units || 0);
+          const total = Number(job.total_units || 0);
+
+          if (status === "queued") {
+            statusElement.textContent = `${label} uploaded. Indexing queued... ${percent}%`;
+          } else if (status === "running") {
+            const progressText = total ? `${processed}/${total}` : "";
+            statusElement.textContent = `${label} uploaded. Indexing running: ${stage} ${progressText} ${percent}%`;
+          } else if (status === "done") {
+            const result = job.result || {};
+            const failedCount = Array.isArray(result.failed_files) ? result.failed_files.length : 0;
+            const chunkCount = result.total_chunks ?? 0;
+
+            if (failedCount > 0 || chunkCount === 0) {
+              statusElement.textContent = `${label} indexing completed with errors. Chunks: ${chunkCount}, Failed files: ${failedCount}`;
+            } else {
+              statusElement.textContent = `${label} indexing completed. Chunks: ${chunkCount}`;
+            }
+
+            await loadSources();
+            return;
+          } else if (status === "failed" || status === "cancelled") {
+            statusElement.textContent = `${label} indexing ${status}: ${job.error_message || "unknown error"}`;
+            await loadSources();
+            return;
+          } else {
+            statusElement.textContent = `${label} uploaded. Indexing status: ${status}`;
+          }
+        } catch (err) {
+          statusElement.textContent = `${label} uploaded. Could not poll indexing status: ${err.message}`;
+          return;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
+
+      statusElement.textContent = `${label} uploaded. Indexing is still running in background. Check Admin ingestion status.`;
+    }
+
+
     async function uploadFile() {
       const fileInput = document.getElementById("fileInput");
       const uploadStatus = document.getElementById("uploadStatus");
@@ -2021,10 +2082,16 @@
           method: "POST",
           body: formData
         });
-        await parseApiResponse(res);
+        const data = await parseApiResponse(res);
+        const jobId = data.job_id;
 
-        uploadStatus.textContent = `Upload complete: ${file.name}`;
-        await loadSources();
+        if (jobId) {
+          uploadStatus.textContent = `Upload accepted: ${file.name}. Indexing started in background...`;
+          pollUploadIngestionJob(jobId, uploadStatus, file.name);
+        } else {
+          uploadStatus.textContent = `Upload accepted: ${file.name}. Indexing started in background.`;
+          await loadSources();
+        }
       } catch (err) {
         uploadStatus.textContent = "Upload failed: " + err.message;
       }
@@ -2058,10 +2125,16 @@
           method: "POST",
           body: formData
         });
-        await parseApiResponse(res);
+        const data = await parseApiResponse(res);
+        const jobId = data.job_id;
 
-        folderStatus.textContent = `Folder upload complete: ${folderName} (${files.length} files)`;
-        await loadSources();
+        if (jobId) {
+          folderStatus.textContent = `Folder upload accepted: ${folderName} (${files.length} files). Indexing started in background...`;
+          pollUploadIngestionJob(jobId, folderStatus, folderName);
+        } else {
+          folderStatus.textContent = `Folder upload accepted: ${folderName} (${files.length} files). Indexing started in background.`;
+          await loadSources();
+        }
       } catch (err) {
         folderStatus.textContent = "Folder upload failed: " + err.message;
       }

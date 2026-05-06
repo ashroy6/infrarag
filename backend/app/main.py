@@ -16,7 +16,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 from app.git_connector import clone_or_pull_repo
 from app.graph_api import router as graph_router
 from app.metadata_db import MetadataDB
-from app.pipeline import ingest_paths
+from app.pipeline import build_graph_for_existing_source, ingest_paths
+from app.ingestion_jobs import cancel_ingestion_job, get_ingestion_job, list_ingestion_jobs, recover_and_start_pending_jobs, retry_ingestion_job, submit_ingestion_job
 from app.qdrant_client import delete_points_by_source_id
 from app.retrieve import retrieve_context
 from app.uploads import save_upload, save_uploads
@@ -48,6 +49,12 @@ OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "140"))
 app = FastAPI(title="InfraRAG Backend", version="2.7.1")
 app.include_router(graph_router)
 app.include_router(agent_router)
+
+@app.on_event("startup")
+def startup_recover_ingestion_jobs():
+    result = recover_and_start_pending_jobs()
+    logger.info("Recovered ingestion jobs on startup: %s", result)
+
 
 REQUEST_COUNT = Counter("infrarag_requests_total", "Total API requests", ["method", "endpoint", "status"])
 REQUEST_LATENCY = Histogram("infrarag_request_latency_seconds", "Request latency", ["endpoint"])
@@ -476,11 +483,12 @@ def api_get_summary_job(job_id: str):
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
     saved_path = await save_upload(file)
-    result = ingest_paths([saved_path], source_type="upload")
+    job_id = submit_ingestion_job([saved_path], source_type="upload")
     return {
-        "message": "Upload processed",
+        "message": "Upload accepted. Ingestion is running in the background.",
         "saved_path": saved_path,
-        "ingest_result": result,
+        "job_id": job_id,
+        "status_url": f"/ingestion-jobs/{job_id}",
     }
 
 
@@ -490,20 +498,40 @@ async def upload_folder(
     folder_name: str = Form("folder_upload"),
 ):
     base_dir, saved_paths = await save_uploads(files, folder_name=folder_name)
-    result = ingest_paths([base_dir], source_type="upload")
+    job_id = submit_ingestion_job([base_dir], source_type="upload")
 
     return {
-        "message": "Folder upload processed",
+        "message": "Folder upload accepted. Ingestion is running in the background.",
         "folder_name": folder_name,
         "saved_base_dir": base_dir,
         "saved_file_count": len(saved_paths),
-        "ingest_result": result,
+        "job_id": job_id,
+        "status_url": f"/ingestion-jobs/{job_id}",
     }
 
 
 @app.post("/ingest/local")
 def ingest_local(paths: list[str]):
-    return ingest_paths(paths, source_type="local")
+    job_id = submit_ingestion_job(paths, source_type="local")
+    return {
+        "message": "Local ingestion accepted. Ingestion is running in the background.",
+        "paths": paths,
+        "job_id": job_id,
+        "status_url": f"/ingestion-jobs/{job_id}",
+    }
+
+
+@app.get("/ingestion-jobs")
+def api_list_ingestion_jobs(limit: int = 50):
+    return {"jobs": list_ingestion_jobs(limit=limit)}
+
+
+@app.get("/ingestion-jobs/{job_id}")
+def api_get_ingestion_job(job_id: str):
+    job = get_ingestion_job(job_id)
+    if not job:
+        raise InfraRAGError("Ingestion job not found", status_code=404, code="ingestion_job_not_found")
+    return {"job": job}
 
 
 @app.post("/ingest/git")
@@ -626,12 +654,13 @@ def admin_reingest(payload: dict):
     if not source_path:
         raise InfraRAGError("source_path is required", status_code=400, code="missing_source_path")
 
-    result = ingest_paths([source_path], source_type=source_type)
+    job_id = submit_ingestion_job([source_path], source_type=source_type)
     return {
-        "message": "Re-ingest complete",
+        "message": "Re-ingest accepted. Ingestion is running in the background.",
         "source_path": source_path,
         "source_type": source_type,
-        "result": result,
+        "job_id": job_id,
+        "status_url": f"/ingestion-jobs/{job_id}",
     }
 
 

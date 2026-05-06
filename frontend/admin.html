@@ -375,8 +375,158 @@
       }
     }
   </style>
+
+<style>
+  .ingestion-status-wrap {
+    margin: 12px 0 16px;
+    padding: 12px;
+    border: 1px solid var(--border, #444);
+    border-radius: 12px;
+    background: var(--panel-2, #303030);
+    color: var(--text, #ececec);
+  }
+
+  .ingestion-status-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+
+  .ingestion-status-title {
+    font-weight: 700;
+  }
+
+  .ingestion-status-meta {
+    color: var(--muted, #b5b5b5);
+    font-size: 12px;
+    text-align: right;
+  }
+
+  .ingestion-bar {
+    width: 100%;
+    height: 10px;
+    background: var(--panel-3, #3a3a3a);
+    border-radius: 999px;
+    overflow: hidden;
+    border: 1px solid var(--border, #444);
+  }
+
+  .ingestion-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent, #10a37f);
+    transition: width 0.3s ease;
+  }
+
+  .ingestion-status-line {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--soft, #cfcfcf);
+    word-break: break-word;
+  }
+
+  .ingestion-status-pill {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    border: 1px solid var(--border, #444);
+    color: var(--text, #ececec);
+    background: var(--panel-3, #3a3a3a);
+  }
+
+  .ingestion-status-pill.running {
+    border-color: #10a37f;
+  }
+
+  .ingestion-status-pill.done {
+    border-color: #22c55e;
+  }
+
+  .ingestion-status-pill.failed {
+    border-color: #ef4444;
+  }
+
+  .ingestion-status-pill.queued {
+    border-color: #f59e0b;
+  }
+</style>
+
+
+<style>
+  .ingestion-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .ingestion-actions button {
+    border: 1px solid var(--border, #444);
+    background: var(--panel-3, #3a3a3a);
+    color: var(--text, #ececec);
+    padding: 7px 10px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .ingestion-actions button:hover {
+    border-color: var(--accent, #10a37f);
+  }
+
+  .ingestion-actions button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .ingestion-actions .danger {
+    border-color: #ef4444;
+  }
+
+  .ingestion-actions .success {
+    border-color: #22c55e;
+  }
+
+  .ingestion-action-message {
+    margin-top: 8px;
+    color: var(--muted, #b5b5b5);
+    font-size: 12px;
+    word-break: break-word;
+  }
+</style>
+
 </head>
 <body>
+
+<div id="ingestionStatusBar" class="ingestion-status-wrap">
+  <div class="ingestion-status-head">
+    <div>
+      <div class="ingestion-status-title">Ingestion Status</div>
+      <div id="ingestionStatusText" class="ingestion-status-line">No ingestion job found yet.</div>
+    </div>
+    <div class="ingestion-status-meta">
+      <span id="ingestionStatusPill" class="ingestion-status-pill">idle</span>
+      <div id="ingestionStatusTime">—</div>
+    </div>
+  </div>
+  <div class="ingestion-bar">
+    <div id="ingestionBarFill" class="ingestion-bar-fill"></div>
+  </div>
+  <div id="ingestionStatusDetail" class="ingestion-status-line"></div>
+  <div id="ingestionActionButtons" class="ingestion-actions">
+    <button id="refreshIngestionBtn" type="button">Refresh</button>
+    <button id="cancelIngestionBtn" class="danger" type="button" disabled>Cancel Ingestion</button>
+    <button id="retryIngestionBtn" type="button" disabled>Retry Failed</button>
+    <button id="buildGraphBtn" class="success" type="button" disabled>Build Graph</button>
+  </div>
+  <div id="ingestionActionMessage" class="ingestion-action-message"></div>
+</div>
+
+
   <h1>InfraRAG Admin</h1>
   <div class="subtitle">View ingested sources, stats, re-ingest sources, delete indexed items, and preview chunks.</div>
 
@@ -746,5 +896,267 @@
 
     loadAll();
   </script>
+
+<script>
+(function () {
+  const statusText = document.getElementById("ingestionStatusText");
+  const statusPill = document.getElementById("ingestionStatusPill");
+  const statusTime = document.getElementById("ingestionStatusTime");
+  const statusDetail = document.getElementById("ingestionStatusDetail");
+  const barFill = document.getElementById("ingestionBarFill");
+  const refreshBtn = document.getElementById("refreshIngestionBtn");
+  const cancelBtn = document.getElementById("cancelIngestionBtn");
+  const retryBtn = document.getElementById("retryIngestionBtn");
+  const buildGraphBtn = document.getElementById("buildGraphBtn");
+  const actionMessage = document.getElementById("ingestionActionMessage");
+
+  let latestJob = null;
+  let latestSource = null;
+
+  if (!statusText || !statusPill || !statusTime || !statusDetail || !barFill) {
+    return;
+  }
+
+  function setBar(status, percent) {
+    const clean = String(status || "idle").toLowerCase();
+
+    let value = Number(percent);
+    if (!Number.isFinite(value)) {
+      value = 0;
+      if (clean === "queued") value = 5;
+      if (clean === "running") value = 50;
+      if (clean === "done") value = 100;
+      if (clean === "failed") value = 100;
+    }
+
+    value = Math.max(0, Math.min(100, value));
+
+    barFill.style.width = value + "%";
+    statusPill.className = "ingestion-status-pill " + clean;
+    statusPill.textContent = clean + " " + Math.round(value) + "%";
+  }
+
+  function shortPath(paths) {
+    if (!paths || !paths.length) return "";
+    const raw = String(paths[0] || "");
+    const parts = raw.split("/");
+    return parts.slice(-3).join("/");
+  }
+
+
+  function setActionMessage(message) {
+    if (actionMessage) {
+      actionMessage.textContent = message || "";
+    }
+  }
+
+  async function postJson(url) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      }
+    });
+
+    const data = await res.json().catch(function () {
+      return {};
+    });
+
+    if (!res.ok) {
+      const msg = data?.error?.message || data?.message || ("HTTP " + res.status);
+      throw new Error(msg);
+    }
+
+    return data;
+  }
+
+  function updateButtons() {
+    const job = latestJob;
+    const source = latestSource;
+
+    if (cancelBtn) {
+      cancelBtn.disabled = !(job && ["queued", "running"].includes(String(job.status || "").toLowerCase()));
+    }
+
+    if (retryBtn) {
+      retryBtn.disabled = !(job && ["failed", "cancelled"].includes(String(job.status || "").toLowerCase()));
+    }
+
+    if (buildGraphBtn) {
+      buildGraphBtn.disabled = !(source && source.source_id);
+    }
+  }
+
+  async function refreshLatestSource() {
+    try {
+      const res = await fetch("/admin/sources?status=active&limit=20", {
+        method: "GET",
+        cache: "no-store"
+      });
+
+      if (!res.ok) return;
+
+      const data = await res.json();
+      const sources = data.sources || [];
+
+      // Prefer bible/latest uploaded source, otherwise latest active source.
+      latestSource =
+        sources.find(function (s) {
+          const p = String(s.source_path || "").toLowerCase();
+          return p.includes("bible") || p.includes("kjv") || p.includes("10.txt");
+        }) || sources[0] || null;
+    } catch (err) {
+      latestSource = null;
+    }
+  }
+
+  async function refreshIngestionStatus() {
+    try {
+      const res = await fetch("/ingestion-jobs?limit=1", {
+        method: "GET",
+        cache: "no-store"
+      });
+
+      if (!res.ok) {
+        throw new Error("HTTP " + res.status);
+      }
+
+      const data = await res.json();
+      const jobs = data.jobs || [];
+
+      if (!jobs.length) {
+        setBar("idle", 0);
+        statusText.textContent = "No ingestion job found yet.";
+        statusTime.textContent = "—";
+        statusDetail.textContent = "";
+        latestJob = null;
+        await refreshLatestSource();
+        updateButtons();
+        return;
+      }
+
+      const job = jobs[0];
+      latestJob = job;
+      await refreshLatestSource();
+      const status = job.status || "unknown";
+      setBar(status, job.progress_percent);
+
+      const fileLabel = shortPath(job.paths || []);
+      statusText.textContent = fileLabel
+        ? "Latest job: " + fileLabel
+        : "Latest ingestion job";
+
+      statusTime.textContent = job.updated_at
+        ? new Date(job.updated_at).toLocaleTimeString()
+        : "—";
+
+      if (status === "done") {
+        const result = job.result || {};
+        statusDetail.textContent =
+          "Done. Files: " + (result.changed_files ?? 0) +
+          " | Chunks: " + (result.total_chunks ?? 0) +
+          " | Failed files: " + ((result.failed_files || []).length) +
+          " | Graph: " + ((result.graph_built || [])[0]?.status || "n/a");
+      } else if (status === "failed") {
+        statusDetail.textContent = "Failed: " + (job.error_message || "Unknown error");
+      } else if (status === "running") {
+        const stage = job.stage || "running";
+        const processed = job.processed_units ?? 0;
+        const total = job.total_units ?? 0;
+        statusDetail.textContent =
+          "Stage: " + stage +
+          (total ? " | Progress: " + processed + " / " + total : "") +
+          " | Admin and Chat should remain responsive.";
+      } else if (status === "queued") {
+        statusDetail.textContent = "Queued. Waiting for ingestion worker.";
+      } else {
+        statusDetail.textContent = "";
+      }
+
+      updateButtons();
+    } catch (err) {
+      setBar("failed", 100);
+      statusText.textContent = "Could not load ingestion status.";
+      statusTime.textContent = "—";
+      statusDetail.textContent = String(err && err.message ? err.message : err);
+    }
+  }
+
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", function () {
+      setActionMessage("Refreshing...");
+      refreshIngestionStatus().then(function () {
+        setActionMessage("Refreshed.");
+      }).catch(function (err) {
+        setActionMessage("Refresh failed: " + (err.message || err));
+      });
+    });
+  }
+
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", async function () {
+      if (!latestJob || !latestJob.job_id) return;
+      if (!confirm("Cancel this ingestion job?")) return;
+
+      try {
+        cancelBtn.disabled = true;
+        setActionMessage("Cancelling ingestion job...");
+        await postJson("/ingestion-jobs/" + encodeURIComponent(latestJob.job_id) + "/cancel");
+        setActionMessage("Cancellation requested.");
+        await refreshIngestionStatus();
+      } catch (err) {
+        setActionMessage("Cancel failed: " + (err.message || err));
+      }
+    });
+  }
+
+  if (retryBtn) {
+    retryBtn.addEventListener("click", async function () {
+      if (!latestJob || !latestJob.job_id) return;
+
+      try {
+        retryBtn.disabled = true;
+        setActionMessage("Retrying failed ingestion job...");
+        const result = await postJson("/ingestion-jobs/" + encodeURIComponent(latestJob.job_id) + "/retry");
+        setActionMessage("Retry started. New job: " + (result.new_job_id || "unknown"));
+        await refreshIngestionStatus();
+      } catch (err) {
+        setActionMessage("Retry failed: " + (err.message || err));
+      }
+    });
+  }
+
+  if (buildGraphBtn) {
+    buildGraphBtn.addEventListener("click", async function () {
+      if (!latestSource || !latestSource.source_id) {
+        setActionMessage("No active source found for graph build.");
+        return;
+      }
+
+      if (!confirm("Build graph for source: " + (latestSource.source_path || latestSource.source_id) + "?")) {
+        return;
+      }
+
+      try {
+        buildGraphBtn.disabled = true;
+        setActionMessage("Building graph. This may take time for large sources...");
+        const result = await postJson("/admin/source/" + encodeURIComponent(latestSource.source_id) + "/build-graph");
+        setActionMessage("Graph build complete: " + JSON.stringify(result.result || result));
+        await refreshIngestionStatus();
+      } catch (err) {
+        setActionMessage("Graph build failed: " + (err.message || err));
+      }
+    });
+  }
+
+  refreshIngestionStatus();
+  setInterval(refreshInestionStatusSafe, 3000);
+
+  function refreshInestionStatusSafe() {
+    refreshIngestionStatus().catch(function () {});
+  }
+})();
+</script>
+
 </body>
 </html>
