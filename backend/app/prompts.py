@@ -513,3 +513,35 @@ Retrieved context:
 Draft answer:
 {draft_answer}
 """.strip()
+
+
+LONG_EXPLANATION_RETRY_PROMPT = """
+You are InfraRAG's long-answer expansion pass.
+
+The previous answer was too short for the long_explanation pipeline.
+
+Rewrite the answer using ONLY the retrieved context.
+Do not invent facts.
+Do not use general knowledge.
+Do not add unsupported details.
+
+Rules:
+- Expand the answer into multiple useful sections.
+- Use all relevant retrieved context.
+- Minimum expected output: 6 numbered sections when evidence exists.
+- If the retrieved context is limited, still explain all available supported facts.
+- If something is not visible in the retrieved context, say exactly what is missing.
+- Do not repeat only the direct answer.
+- Do not output a one-line answer.
+
+Question:
+{question}
+
+Previous short answer:
+{short_answer}
+
+Retrieved Context:
+{context_text}
+
+Return only the expanded final answer.
+""".strip()

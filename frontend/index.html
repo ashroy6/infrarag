@@ -1820,6 +1820,14 @@
           updateLastAssistant(answer || "Evidence found. Generating answer...", { meta, citations });
         });
 
+        eventSource.addEventListener("answer_replace", event => {
+          const data = JSON.parse(event.data);
+          answer = data.answer || "";
+          meta.progress = data.progress ?? meta.progress ?? 88;
+          meta.progress_label = data.progress_label || "Replacing answer.";
+          updateLastAssistant(answer || "Preparing expanded answer...", { meta, citations });
+        });
+
         eventSource.addEventListener("token", event => {
           const data = JSON.parse(event.data);
           answer += data.token || "";

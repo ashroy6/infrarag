@@ -25,6 +25,7 @@ from app.prompts import (
     DENIAL_RECOVERY_PROMPT,
     INCIDENT_RUNBOOK_PROMPT,
     LONG_EXPLANATION_PROMPT,
+    LONG_EXPLANATION_RETRY_PROMPT,
     NORMAL_QA_PROMPT,
     REPO_EXPLANATION_PROMPT,
 )
@@ -43,6 +44,7 @@ from app.rag_metrics import (
 from app.response_formatter import no_evidence_response
 from app.retrieve import retrieve_context
 from app.router import decide_intent
+from app.source_resolver import resolve_source_for_question
 from app.summary_jobs import start_document_summary_job
 
 MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "0.35"))
@@ -225,6 +227,31 @@ def _build_prompt(
         question=question,
         context_text=context_text,
     )
+
+
+def _long_answer_too_short(answer: str, pipeline_used: str, citations: list[dict[str, Any]]) -> bool:
+    if pipeline_used != "long_explanation":
+        return False
+
+    if not citations:
+        return False
+
+    clean = re.sub(r"\s+", " ", (answer or "").strip())
+    if not clean:
+        return True
+
+    # Generic completeness check:
+    # long_explanation should not return only one tiny section when evidence exists.
+    section_count = len(re.findall(r"(?m)^\s*\d+\.\s+", answer or ""))
+    word_count = len(re.findall(r"\b\w+\b", clean))
+
+    if word_count < 120:
+        return True
+
+    if section_count < 3:
+        return True
+
+    return False
 
 
 def _chunk_index(chunk: dict[str, Any]) -> int:
@@ -421,6 +448,16 @@ def stream_ask_events(
         followup = resolve_followup_question(normalized_question, chat_context)
         effective_question = followup.get("resolved_question") or normalized_question
 
+        source_resolution = resolve_source_for_question(
+            effective_question,
+            source_id=source_id,
+            source_type=source_type,
+            file_type=file_type,
+        )
+
+        if not source_id and source_resolution.get("source_id"):
+            source_id = str(source_resolution.get("source_id"))
+
         routing = decide_intent(effective_question, chat_context=chat_context)
         routing["original_question"] = normalized_question
         routing["resolved_question"] = effective_question
@@ -468,6 +505,10 @@ def stream_ask_events(
                 "graph_context_enabled": bool(use_graph_context and not exact_file_mode),
                 "graph_chunks_added": 0,
                 "requested_file": requested_file,
+                "source_resolution_mode": source_resolution.get("mode"),
+                "source_resolution_reason": source_resolution.get("reason"),
+                "auto_source_id": source_resolution.get("source_id"),
+                "auto_source_path": source_resolution.get("source_path"),
                 "verification_verdict": "pending" if pipeline_used in {"long_explanation", "repo_explanation", "incident_runbook"} else "skipped",
                 "progress": 15,
                 "progress_label": "Planning complete. Searching evidence.",
@@ -684,6 +725,98 @@ def stream_ask_events(
             return
 
         answer = "".join(answer_parts).strip() or "No evidence found in the knowledge base."
+
+        # Generic long-answer completeness recovery.
+        # If long_explanation returns a tiny answer despite retrieved evidence,
+        # run one stricter expansion pass before verifier.
+        #
+        # Important:
+        # This retry must stream. Do not use generate_text() here, because that
+        # waits for the full answer and then dumps everything into the UI at once.
+        if _long_answer_too_short(answer, pipeline_used, citations):
+            yield _sse(
+                "verification_status",
+                {
+                    "message": "Expanding short long-form answer...",
+                    "verification_verdict": "expansion_running",
+                    "progress": 88,
+                    "progress_label": "Expanding answer.",
+                },
+            )
+
+            retry_prompt = LONG_EXPLANATION_RETRY_PROMPT.format(
+                question=effective_question,
+                short_answer=answer,
+                context_text=context_text,
+            )
+
+            # Tell the frontend to clear the tiny first answer before streaming
+            # the expanded replacement.
+            yield _sse(
+                "answer_replace",
+                {
+                    "answer": "",
+                    "progress": 88,
+                    "progress_label": "Streaming expanded answer.",
+                },
+            )
+
+            expanded_parts: list[str] = []
+
+            try:
+                for token in stream_generate_text(
+                    retry_prompt,
+                    temperature=0.0,
+                    num_predict=max(num_predict, 1800),
+                    timeout=600,
+                    cancel_check=cancelled,
+                ):
+                    if cancelled():
+                        yield _sse("cancelled", cancel_payload("answer_expansion"))
+                        return
+
+                    expanded_parts.append(token)
+                    expanded_text = "".join(expanded_parts)
+                    progress = min(94, 88 + (len(expanded_text) // 450))
+
+                    yield _sse(
+                        "token",
+                        {
+                            "token": token,
+                            "progress": progress,
+                            "progress_label": "Streaming expanded answer.",
+                        },
+                    )
+
+            except LLMCancelled:
+                yield _sse("cancelled", cancel_payload("answer_expansion"))
+                return
+            except Exception:
+                expanded_parts = []
+
+            expanded = "".join(expanded_parts).strip()
+
+            if expanded and not _long_answer_too_short(expanded, pipeline_used, citations):
+                answer = expanded
+                verification_result = {
+                    "verification_verdict": "expanded",
+                    "unsupported_claims": [],
+                    "verification_reason": "Expanded short long-form answer using retrieved context.",
+                    "verified": False,
+                }
+
+                yield _sse(
+                    "verification",
+                    {
+                        "verification_verdict": "expanded",
+                        "unsupported_claims": [],
+                        "verification_reason": "Expanded short long-form answer using retrieved context.",
+                        "verified": False,
+                        "corrected_answer": answer,
+                        "progress": 95,
+                        "progress_label": "Expansion complete.",
+                    },
+                )
 
         # Do not clear citations before verification.
         # If the model falsely denies evidence while citations exist, the verifier needs

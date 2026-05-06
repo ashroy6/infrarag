@@ -324,32 +324,31 @@ def resolve_followup_question(question: str, chat_context: str = "") -> dict[str
     if point_resolved and point_resolved.get("resolved_question") != cleaned:
         return point_resolved
 
-    prompt = FOLLOWUP_RESOLVER_PROMPT.format(
-        question=cleaned,
-        chat_context=chat_context[-5000:],
-    )
+    # Important:
+    # For vague follow-ups like "elaborate the above", "explain more", or
+    # "tell me more", do not call the LLM resolver.
+    # A small local model may rewrite the question into a short factual lookup
+    # and accidentally downgrade the route to normal_qa.
+    #
+    # Keep the word "Elaborate" in the resolved question so router.py selects
+    # long_explanation using rules_first.
+    latest_assistant = _latest_assistant_answer(chat_context)
+    latest_user = _latest_user_question(chat_context)
+    basis = latest_assistant or latest_user
 
-    try:
-        raw = generate_text(
-            prompt,
-            temperature=0.0,
-            num_predict=FOLLOWUP_RESOLVER_NUM_PREDICT,
-            timeout=FOLLOWUP_RESOLVER_TIMEOUT_SECONDS,
-        )
-        data = _extract_json(raw)
-    except Exception:
-        data = None
-
-    if not data:
-        return _fallback_resolve(cleaned, chat_context)
-
-    resolved = normalize_spaces(str(data.get("resolved_question") or cleaned))
-
-    if not resolved:
-        resolved = cleaned
+    if basis:
+        basis = normalize_spaces(basis)[:900]
+        return {
+            "is_followup": True,
+            "resolved_question": (
+                "Elaborate in detail on the previous answer. "
+                f"Previous answer/topic: {basis}"
+            ),
+            "reason": "Vague follow-up resolved deterministically from recent conversation context.",
+        }
 
     return {
-        "is_followup": bool(data.get("is_followup", True)),
-        "resolved_question": resolved,
-        "reason": str(data.get("reason") or "Resolved by follow-up resolver.")[:300],
+        "is_followup": True,
+        "resolved_question": cleaned,
+        "reason": "Vague follow-up detected but no usable recent context found.",
     }

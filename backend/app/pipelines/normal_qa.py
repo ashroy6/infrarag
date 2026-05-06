@@ -9,6 +9,7 @@ from app.llm_client import generate_text
 from app.prompts import DENIAL_RECOVERY_PROMPT, NORMAL_QA_PROMPT
 from app.response_formatter import no_evidence_response
 from app.retrieve import retrieve_context
+from app.source_resolver import resolve_source_for_question
 
 MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "0.35"))
 NORMAL_QA_LIMIT = int(os.getenv("NORMAL_QA_LIMIT", "6"))
@@ -25,10 +26,19 @@ def run(
     page_start: int | None = None,
     page_end: int | None = None,
 ) -> dict[str, Any]:
+    source_resolution = resolve_source_for_question(
+        question,
+        source_id=source_id,
+        source_type=source_type,
+        file_type=file_type,
+    )
+
+    resolved_source_id = source_id or source_resolution.get("source_id")
+
     chunks = retrieve_context(
         question,
         limit=NORMAL_QA_LIMIT,
-        source_id=source_id,
+        source_id=resolved_source_id,
         source=source,
         source_type=source_type,
         file_type=file_type,
@@ -148,5 +158,6 @@ def run(
         "answer": answer,
         "citations": citations,
         "verification_context_text": context_text,
+        "source_resolution": source_resolution,
         **verification_result,
     }
