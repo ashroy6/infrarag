@@ -118,6 +118,8 @@ Critical evidence rule:
 - Before saying "No evidence found" or "not mentioned", inspect every retrieved chunk carefully.
 - If any retrieved chunk contains a matching person, company, role, project, date, skill, responsibility, tool, system, source, or relationship relevant to the question, answer from that evidence.
 - Do not deny evidence exists when relevant facts are present in the retrieved context.
+- If the user asks for URLs, links, repo names, IDs, or exact values and only partial evidence is present, provide the supported part and clearly say which exact value is not visible in the retrieved context.
+- Do not turn a partial answer into "No evidence found" when some requested facts are present.
 
 Rules:
 - Be concise and factual.
@@ -135,6 +137,31 @@ Retrieved Context:
 {context_text}
 
 Return only the answer text.
+""".strip()
+
+
+
+DENIAL_RECOVERY_PROMPT = """
+You are InfraRAG's evidence recovery pass.
+
+The first answer incorrectly failed or denied evidence.
+Your task is to answer again using ONLY the retrieved context.
+
+Rules:
+- Inspect the retrieved context carefully.
+- If the context contains any relevant names, titles, projects, roles, dates, tools, links, labels, responsibilities, or values, answer with those supported facts.
+- If the user asks for exact URLs/links/repo slugs but the context only shows project names or link labels, return the project names and explicitly say the exact URLs/links are not visible in the retrieved context.
+- Do not invent missing URLs, repo slugs, people, companies, dates, or tools.
+- Only say "No evidence found in the knowledge base." if there is no relevant fact at all in the retrieved context.
+- Keep the answer concise.
+
+Question:
+{question}
+
+Retrieved Context:
+{context_text}
+
+Return only the final answer text.
 """.strip()
 
 
@@ -437,7 +464,8 @@ Verdict rules:
 - Use "valid" if every important claim is supported.
 - Use "needs_revision" if the draft contains unsupported or overgeneralised parts but a useful supported answer can still be written.
 - Use "needs_revision" if the draft falsely says there is no evidence, no mention, or no support, but the retrieved context contains relevant facts.
-- Use "insufficient_evidence" only if the retrieved context cannot support any useful answer.
+- Use "needs_revision" if the context supports partial facts but not exact URLs, IDs, links, or missing details.
+- Use "insufficient_evidence" only if the retrieved context cannot support any useful answer at all.
 - If you remove, narrow, or rewrite unsupported parts, the verdict MUST be "needs_revision".
 - Do not use any other verdict.
 
@@ -451,6 +479,9 @@ Correction rules:
 - If only one sentence is unsupported, rewrite only that sentence and keep the rest.
 - corrected_answer must never repeat unsupported draft claims.
 - corrected_answer must not introduce new claims.
+- If the retrieved context supports part of the requested answer, keep the supported part and clearly state what exact detail is missing.
+- If names/titles are supported but URLs/links are missing, return the supported names/titles and say the URLs/links are not visible in the retrieved context.
+- Do NOT replace a partially supported answer with a generic insufficient-evidence message.
 - For comparisons, explain each side separately first.
 - Only say "both" if the same point is clearly supported for both sides.
 - If two concepts prevent different problems, say that clearly.

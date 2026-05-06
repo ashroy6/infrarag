@@ -240,6 +240,78 @@ def _looks_like_numbered_followup(q: str) -> bool:
     )
 
 
+def _looks_like_direct_factual_question(q: str) -> bool:
+    """
+    Fast-path simple factual/document questions.
+
+    These should not call the LLM planner. They only need normal retrieval + answer.
+    Generic examples:
+    - who is X
+    - what is X
+    - where is X
+    - list the names of X
+    - tell me about X from the CV/document
+    - what are the names/items/tools/projects/roles in source
+    """
+    clean = " ".join((q or "").lower().split())
+    if not clean:
+        return False
+
+    # Do not steal obvious specialist routes.
+    if _looks_like_summary_question(clean):
+        return False
+    if _looks_like_long_explanation(clean):
+        return False
+    if _looks_like_incident_question(clean):
+        return False
+    if _looks_like_file_question(clean):
+        return False
+
+    direct_patterns = (
+        r"^who\s+",
+        r"^what\s+",
+        r"^where\s+",
+        r"^when\s+",
+        r"^which\s+",
+        r"^list\s+",
+        r"^show\s+",
+        r"^give\s+me\s+",
+        r"^tell\s+me\s+about\s+",
+        r"^tell\s+me\s+",
+        r"^name\s+",
+        r"^names\s+of\s+",
+        r"^what\s+are\s+the\s+names\s+of\s+",
+        r"^what\s+are\s+",
+    )
+
+    if any(re.search(pattern, clean, flags=re.IGNORECASE) for pattern in direct_patterns):
+        return True
+
+    factual_markers = (
+        "from the cv",
+        "in the cv",
+        "from this cv",
+        "from the resume",
+        "in the resume",
+        "from this resume",
+        "from the document",
+        "in the document",
+        "from this document",
+        "names of",
+        "name of",
+        "list of",
+        "github repo",
+        "github repos",
+        "github repositories",
+        "experience at",
+        "experience in",
+    )
+
+    return any(marker in clean for marker in factual_markers)
+
+
+
+
 def decide_intent(question: str, chat_context: str = "") -> dict[str, Any]:
     q = " ".join((question or "").lower().split())
 
@@ -341,6 +413,20 @@ def decide_intent(question: str, chat_context: str = "") -> dict[str, Any]:
             final_top_k=6,
             source_strategy="cluster_by_best_source",
             question_type="topic_summary",
+        )
+
+    if _looks_like_direct_factual_question(q):
+        return _base_response(
+            pipeline="normal_qa",
+            question=question,
+            reason="Rules-first router selected normal Q&A because the question is a direct factual lookup.",
+            confidence=0.9,
+            answer_length="concise",
+            needs_all_chunks=False,
+            candidate_top_k=40,
+            final_top_k=6,
+            source_strategy="cluster_by_best_source",
+            question_type="direct_factual",
         )
 
     # 2. Only use LLM planner when hard rules do not clearly identify the intent.

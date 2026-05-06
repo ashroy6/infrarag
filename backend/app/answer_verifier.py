@@ -60,6 +60,38 @@ def answer_denies_evidence(answer: str, citations: list[dict[str, Any]] | None =
     return any(phrase in text for phrase in DENIAL_PHRASES)
 
 
+GENERIC_FAILURE_ANSWERS = (
+    "the retrieved evidence is insufficient to safely verify the draft answer",
+    "please ask a narrower question or select a more specific source",
+    "the draft answer contained claims that could not be safely verified",
+)
+
+
+def _looks_like_generic_failure(answer: str) -> bool:
+    text = " ".join((answer or "").lower().split())
+    return any(phrase in text for phrase in GENERIC_FAILURE_ANSWERS)
+
+
+def _has_substantive_draft_answer(answer: str) -> bool:
+    """
+    Generic check: avoid throwing away a useful answer just because verifier is over-strict.
+    This does not hardcode any person, company, project, or domain.
+    """
+    text = " ".join((answer or "").strip().split())
+    if not text:
+        return False
+
+    lowered = text.lower()
+    if _looks_like_generic_failure(lowered):
+        return False
+
+    if answer_denies_evidence(text, citations=[{"dummy": "citation_exists"}]):
+        return False
+
+    # Needs at least a small factual answer.
+    return len(text) >= 25 and len(text.split()) >= 4
+
+
 def _limit_text(value: str, max_chars: int) -> str:
     text = value or ""
     if len(text) <= max_chars:
@@ -314,11 +346,15 @@ def verify_answer(
         corrected = draft_answer
 
     # Guardrail:
-    # If verifier says revision is needed but gives back the same unsafe draft, replace with a safe fallback.
+    # Do not throw away a useful partial answer and replace it with a generic failure.
+    # If the verifier cannot improve the answer, keep the draft when it is substantive.
     if verdict in {"needs_revision", "insufficient_evidence"} and corrected.strip() == draft_answer.strip():
-        if verdict == "insufficient_evidence":
+        if _has_substantive_draft_answer(draft_answer):
+            verdict = "needs_revision"
+            corrected = draft_answer
+        elif verdict == "insufficient_evidence":
             corrected = (
-                "The retrieved evidence is insufficient to safely verify the draft answer. "
+                "The retrieved evidence is insufficient to safely answer this. "
                 "Please ask a narrower question or select a more specific source."
             )
         else:
@@ -326,6 +362,13 @@ def verify_answer(
                 "The draft answer contained claims that could not be safely verified from the retrieved context. "
                 "Please ask a narrower question or select a more specific source."
             )
+
+    # Guardrail:
+    # If verifier generates a generic failure but the draft had useful supported content,
+    # keep the draft instead of degrading the answer.
+    if _looks_like_generic_failure(corrected) and _has_substantive_draft_answer(draft_answer):
+        verdict = "needs_revision"
+        corrected = draft_answer
 
     return {
         "verification_verdict": verdict,

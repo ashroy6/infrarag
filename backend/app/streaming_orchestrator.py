@@ -19,9 +19,10 @@ from app.chat_history import (
 )
 from app.context_utils import build_citations, build_context_text, compact_chunks
 from app.followup_resolver import resolve_followup_question
-from app.llm_client import CHAT_MODEL, LLMCancelled, stream_generate_text
+from app.llm_client import CHAT_MODEL, LLMCancelled, generate_text, stream_generate_text
 from app.prompts import (
     CODE_FILE_EXPLANATION_PROMPT,
+    DENIAL_RECOVERY_PROMPT,
     INCIDENT_RUNBOOK_PROMPT,
     LONG_EXPLANATION_PROMPT,
     NORMAL_QA_PROMPT,
@@ -745,10 +746,12 @@ def stream_ask_events(
                 if corrected_answer.strip():
                     answer = corrected_answer
 
-            if answer.strip() == "No evidence found in the knowledge base.":
+            # Do not clear citations here.
+            # If retrieved evidence exists, citations must remain visible for debugging/trust.
+            if answer.strip() == "No evidence found in the knowledge base." and not citations:
                 citations = []
 
-            if answer_denies_evidence(answer, citations):
+            if answer_denies_evidence(answer, citations) and not citations:
                 citations = []
 
             yield _sse(
@@ -764,10 +767,86 @@ def stream_ask_events(
                 },
             )
 
-        if answer.strip() == "No evidence found in the knowledge base.":
+        # Generic recovery:
+        # If retrieval produced citations but the model still denies evidence,
+        # run a stricter second pass before clearing citations.
+        if (not exact_file_mode) and answer_denies_evidence(answer, citations):
+            yield _sse(
+                "verification_status",
+                {
+                    "message": "Recovering answer from retrieved evidence...",
+                    "verification_verdict": "recovery_running",
+                    "progress": 96,
+                    "progress_label": "Recovering answer.",
+                },
+            )
+
+            recovery_prompt = DENIAL_RECOVERY_PROMPT.format(
+                question=effective_question,
+                context_text=context_text,
+            )
+
+            try:
+                recovered = generate_text(
+                    recovery_prompt,
+                    temperature=0.0,
+                    num_predict=num_predict,
+                    timeout=600,
+                ).strip()
+            except Exception:
+                recovered = ""
+
+            if recovered and not answer_denies_evidence(recovered, citations):
+                answer = recovered
+                verification_result = {
+                    **verification_result,
+                    "verification_verdict": "recovered",
+                    "verification_reason": "Second-pass evidence recovery corrected a false no-evidence answer.",
+                    "verified": False,
+                }
+
+                yield _sse(
+                    "verification",
+                    {
+                        "verification_verdict": "recovered",
+                        "unsupported_claims": [],
+                        "verification_reason": "Second-pass evidence recovery corrected a false no-evidence answer.",
+                        "verified": False,
+                        "corrected_answer": answer,
+                        "progress": 98,
+                        "progress_label": "Recovery complete.",
+                    },
+                )
+
+        # Final guard:
+        # Never hide citations if retrieval found evidence.
+        # If the model failed, show a transparent failure message with citations intact.
+        if answer.strip() == "No evidence found in the knowledge base." and citations:
+            answer = (
+                "Relevant evidence was retrieved, but the answer model failed to extract a supported answer from it. "
+                "Open the citations to inspect the retrieved chunks, or ask a narrower question."
+            )
+            verification_result = {
+                **verification_result,
+                "verification_verdict": "answer_generation_failed_with_evidence",
+                "verification_reason": "Model returned no-evidence despite retrieved citations.",
+                "verified": False,
+            }
+        elif answer.strip() == "No evidence found in the knowledge base.":
             citations = []
 
-        if answer_denies_evidence(answer, citations):
+        if answer_denies_evidence(answer, citations) and citations:
+            answer = (
+                "Relevant evidence was retrieved, but the answer model denied or failed to use it. "
+                "Open the citations to inspect the retrieved chunks, or ask a narrower question."
+            )
+            verification_result = {
+                **verification_result,
+                "verification_verdict": "answer_denied_retrieved_evidence",
+                "verification_reason": "Model denied evidence despite retrieved citations.",
+                "verified": False,
+            }
+        elif answer_denies_evidence(answer, citations):
             citations = []
 
         if cancelled():

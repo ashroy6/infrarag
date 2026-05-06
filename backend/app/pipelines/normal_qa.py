@@ -6,7 +6,7 @@ from typing import Any
 from app.answer_verifier import answer_denies_evidence, should_verify_answer, verify_answer
 from app.context_utils import build_citations, build_context_text, compact_chunks
 from app.llm_client import generate_text
-from app.prompts import NORMAL_QA_PROMPT
+from app.prompts import DENIAL_RECOVERY_PROMPT, NORMAL_QA_PROMPT
 from app.response_formatter import no_evidence_response
 from app.retrieve import retrieve_context
 
@@ -83,6 +83,60 @@ def run(
 
         if verdict in {"needs_revision", "insufficient_evidence"} and corrected:
             answer = corrected
+
+    # Generic recovery:
+    # If retrieval produced citations but the model still denies evidence,
+    # run a stricter second pass before giving up.
+    if answer_denies_evidence(answer, citations):
+        recovery_prompt = DENIAL_RECOVERY_PROMPT.format(
+            question=question,
+            context_text=context_text,
+        )
+        recovered = generate_text(
+            recovery_prompt,
+            temperature=0.0,
+            num_predict=NORMAL_QA_NUM_PREDICT,
+        ).strip()
+
+        if recovered and not answer_denies_evidence(recovered, citations):
+            answer = recovered
+            verification_result = {
+                **verification_result,
+                "verification_verdict": "recovered",
+                "verification_reason": "Second-pass evidence recovery corrected a false no-evidence answer.",
+                "verified": False,
+            }
+
+    # Important:
+    # If retrieval produced citations, do not hide them just because the model failed.
+    # Returning citations keeps the system debuggable and allows the UI/user to inspect evidence.
+    if answer.strip() == "No evidence found in the knowledge base." and citations:
+        return {
+            "answer": (
+                "Relevant evidence was retrieved, but the answer model failed to extract a supported answer from it. "
+                "Open the citations to inspect the retrieved chunks, or ask a narrower question."
+            ),
+            "citations": citations,
+            "verification_context_text": context_text,
+            "verification_verdict": "answer_generation_failed_with_evidence",
+            "unsupported_claims": [],
+            "verification_reason": "Model returned no-evidence despite retrieved citations.",
+            "verified": False,
+        }
+
+    if answer_denies_evidence(answer, citations) and citations:
+        return {
+            "answer": (
+                "Relevant evidence was retrieved, but the answer model denied or failed to use it. "
+                "Open the citations to inspect the retrieved chunks, or ask a narrower question."
+            ),
+            "citations": citations,
+            "verification_context_text": context_text,
+            "verification_verdict": "answer_denied_retrieved_evidence",
+            "unsupported_claims": [],
+            "verification_reason": "Model denied evidence despite retrieved citations.",
+            "verified": False,
+        }
 
     if answer.strip() == "No evidence found in the knowledge base.":
         return no_evidence_response()
