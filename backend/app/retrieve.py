@@ -281,6 +281,7 @@ def _multi_query_search(
     file_type: str | None,
     page_start: int | None,
     page_end: int | None,
+    allowed_source_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     all_hits: list[dict[str, Any]] = []
 
@@ -296,6 +297,7 @@ def _multi_query_search(
             file_type=file_type,
             page_start=page_start,
             page_end=page_end,
+            allowed_source_ids=allowed_source_ids,
         )
 
         for hit in hits:
@@ -331,6 +333,7 @@ def retrieve_context(
     retrieval_plan: dict[str, Any] | None = None,
     use_graph_context: bool = False,
     graph_max_chunks: int = 3,
+    allowed_source_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     safe_limit = max(1, min(int(limit), 50))
 
@@ -371,6 +374,7 @@ def retrieve_context(
         file_type=file_type,
         page_start=page_start,
         page_end=page_end,
+        allowed_source_ids=allowed_source_ids,
     )
 
     if not raw_hits:

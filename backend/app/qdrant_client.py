@@ -60,8 +60,49 @@ def _build_filter(
     file_type: str | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
+    allowed_source_ids: list[str] | None = None,
 ) -> Filter | None:
     conditions: list[FieldCondition] = []
+    should_conditions: list[FieldCondition] = []
+
+    clean_allowed_source_ids = [
+        str(item).strip()
+        for item in (allowed_source_ids or [])
+        if str(item).strip()
+    ]
+
+    # If caller explicitly passes an empty allow-list, return no results.
+    if allowed_source_ids is not None and not clean_allowed_source_ids:
+        conditions.append(
+            FieldCondition(
+                key="source_id",
+                match=MatchValue(value="__NO_ALLOWED_SOURCES__"),
+            )
+        )
+
+    # If a source_id is requested inside an allow-list, enforce intersection.
+    # If source_id is outside the allow-list, force no result.
+    if source_id and clean_allowed_source_ids and source_id not in clean_allowed_source_ids:
+        conditions.append(
+            FieldCondition(
+                key="source_id",
+                match=MatchValue(value="__SOURCE_NOT_ALLOWED__"),
+            )
+        )
+
+    if not source_id and len(clean_allowed_source_ids) == 1:
+        conditions.append(
+            FieldCondition(
+                key="source_id",
+                match=MatchValue(value=clean_allowed_source_ids[0]),
+            )
+        )
+
+    if not source_id and len(clean_allowed_source_ids) > 1:
+        should_conditions.extend(
+            FieldCondition(key="source_id", match=MatchValue(value=item))
+            for item in clean_allowed_source_ids
+        )
 
     if source_id:
         conditions.append(FieldCondition(key="source_id", match=MatchValue(value=source_id)))
@@ -81,8 +122,11 @@ def _build_filter(
     if page_end is not None:
         conditions.append(FieldCondition(key="page_number", range=Range(lte=page_end)))
 
-    if not conditions:
+    if not conditions and not should_conditions:
         return None
+
+    if should_conditions:
+        return Filter(must=conditions, should=should_conditions)
 
     return Filter(must=conditions)
 
@@ -102,6 +146,15 @@ def _payload_to_hit(item: Any) -> dict[str, Any]:
         "page_number": payload.get("page_number"),
         "page_start": payload.get("page_start"),
         "page_end": payload.get("page_end"),
+        "tenant_id": payload.get("tenant_id"),
+        "owner_user_id": payload.get("owner_user_id"),
+        "source_group": payload.get("source_group"),
+        "connector": payload.get("connector"),
+        "data_domain": payload.get("data_domain"),
+        "security_level": payload.get("security_level"),
+        "tags": payload.get("tags", []),
+        "agent_access_enabled": payload.get("agent_access_enabled"),
+        "knowledge_source_id": payload.get("knowledge_source_id"),
     }
 
 
@@ -114,6 +167,7 @@ def search(
     file_type: str | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
+    allowed_source_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     client = get_client()
 
@@ -128,6 +182,7 @@ def search(
         file_type=file_type,
         page_start=page_start,
         page_end=page_end,
+        allowed_source_ids=allowed_source_ids,
     )
 
     response = client.query_points(

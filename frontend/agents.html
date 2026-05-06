@@ -1,0 +1,991 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InfraRAG Agent Studio</title>
+  <style>
+    :root {
+      --bg: #212121;
+      --sidebar: #171717;
+      --panel: #2a2a2a;
+      --panel-2: #303030;
+      --panel-3: #3a3a3a;
+      --border: #444444;
+      --text: #ececec;
+      --muted: #b5b5b5;
+      --soft: #cfcfcf;
+      --accent: #10a37f;
+      --accent-2: #0e8f70;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+      --ok: #22c55e;
+      --blue: #3b82f6;
+      --shadow: rgba(0, 0, 0, 0.22);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 280px 1fr 360px;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    .sidebar {
+      background: var(--sidebar);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .brand {
+      padding: 18px 18px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .brand-title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-subtitle {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 5px;
+      line-height: 1.4;
+    }
+
+    .nav {
+      display: flex;
+      gap: 8px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav a {
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      border-radius: 9px;
+      color: var(--soft);
+      font-size: 12px;
+    }
+
+    .nav a.active {
+      border-color: var(--accent);
+      color: white;
+      background: rgba(16, 163, 127, 0.18);
+    }
+
+    .section-title {
+      padding: 14px 16px 8px;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .agent-list {
+      padding: 0 10px 12px;
+      overflow: auto;
+      flex: 1;
+    }
+
+    .agent-card {
+      border: 1px solid transparent;
+      background: transparent;
+      border-radius: 12px;
+      padding: 12px;
+      cursor: pointer;
+      margin-bottom: 8px;
+      transition: 0.12s ease;
+    }
+
+    .agent-card:hover {
+      background: var(--panel);
+      border-color: var(--border);
+    }
+
+    .agent-card.active {
+      background: var(--panel-2);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(16, 163, 127, 0.18);
+    }
+
+    .agent-name {
+      font-weight: 650;
+      margin-bottom: 5px;
+    }
+
+    .agent-description {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .badge-row {
+      margin-top: 8px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 7px;
+      border-radius: 999px;
+      background: var(--panel-3);
+      border: 1px solid var(--border);
+      color: var(--soft);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .badge.ok {
+      color: #b8f7ce;
+      border-color: rgba(34, 197, 94, 0.35);
+      background: rgba(34, 197, 94, 0.12);
+    }
+
+    .badge.warn {
+      color: #ffe0a3;
+      border-color: rgba(245, 158, 11, 0.35);
+      background: rgba(245, 158, 11, 0.12);
+    }
+
+    .main {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      height: 100vh;
+    }
+
+    .topbar {
+      height: 68px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 22px;
+      background: rgba(33, 33, 33, 0.95);
+    }
+
+    .page-title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .page-subtitle {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 11px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--soft);
+      font-size: 12px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--muted);
+    }
+
+    .dot.ok {
+      background: var(--ok);
+    }
+
+    .dot.warn {
+      background: var(--warning);
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 14px;
+      padding: 16px;
+      overflow: hidden;
+      height: calc(100vh - 68px);
+    }
+
+    .agent-header {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 8px 20px var(--shadow);
+    }
+
+    .agent-header h2 {
+      margin: 0;
+      font-size: 19px;
+      letter-spacing: -0.02em;
+    }
+
+    .agent-header p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .instructions {
+      margin-top: 12px;
+      padding: 11px;
+      border-radius: 11px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--soft);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .answer-panel {
+      min-height: 0;
+      overflow: auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 8px 20px var(--shadow);
+      padding: 16px;
+    }
+
+    .empty {
+      color: var(--muted);
+      text-align: center;
+      padding: 80px 20px;
+      line-height: 1.5;
+    }
+
+    .answer-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .answer {
+      white-space: pre-wrap;
+      line-height: 1.58;
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    .composer {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      box-shadow: 0 8px 20px var(--shadow);
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 88px;
+      resize: vertical;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      outline: none;
+      border-radius: 11px;
+      padding: 12px;
+      font: inherit;
+      line-height: 1.45;
+    }
+
+    textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(16, 163, 127, 0.25);
+    }
+
+    .composer-actions {
+      margin-top: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .input-help {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      background: var(--accent);
+      color: white;
+      font-weight: 650;
+      cursor: pointer;
+      transition: 0.12s ease;
+    }
+
+    button:hover {
+      background: var(--accent-2);
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    button.secondary {
+      background: var(--panel-3);
+      border: 1px solid var(--border);
+      color: var(--soft);
+    }
+
+    button.secondary:hover {
+      background: #454545;
+    }
+
+    .right {
+      background: var(--sidebar);
+      border-left: 1px solid var(--border);
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .right-scroll {
+      overflow: auto;
+      padding: 14px;
+      flex: 1;
+    }
+
+    .side-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      margin-bottom: 14px;
+      overflow: hidden;
+    }
+
+    .side-panel-header {
+      padding: 12px 13px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .side-panel-title {
+      font-weight: 650;
+      font-size: 13px;
+    }
+
+    .side-panel-body {
+      padding: 12px 13px;
+    }
+
+    .source-item,
+    .citation-item,
+    .event-item {
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      border-radius: 11px;
+      padding: 10px;
+      margin-bottom: 9px;
+    }
+
+    .source-name,
+    .citation-source,
+    .event-type {
+      font-weight: 650;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .source-meta,
+    .citation-meta,
+    .event-meta {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .event-item.success {
+      border-color: rgba(34, 197, 94, 0.35);
+    }
+
+    .event-item.warning {
+      border-color: rgba(245, 158, 11, 0.35);
+    }
+
+    .event-item.error {
+      border-color: rgba(239, 68, 68, 0.35);
+    }
+
+    .small-muted {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .error {
+      color: #fecaca;
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.35);
+      padding: 10px;
+      border-radius: 10px;
+      margin-top: 10px;
+      white-space: pre-wrap;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 1200px) {
+      .app {
+        grid-template-columns: 260px 1fr;
+      }
+
+      .right {
+        display: none;
+      }
+    }
+
+    @media (max-width: 820px) {
+      body {
+        overflow: auto;
+        height: auto;
+      }
+
+      .app {
+        display: block;
+        height: auto;
+      }
+
+      .sidebar,
+      .main {
+        height: auto;
+      }
+
+      .workspace {
+        height: auto;
+        overflow: visible;
+      }
+
+      .agent-list {
+        max-height: 340px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-title">InfraRAG Agent Studio</div>
+        <div class="brand-subtitle">Build and run permission-scoped enterprise agents over private knowledge sources.</div>
+      </div>
+
+      <div class="nav">
+        <a href="/">Chat</a>
+        <a href="/admin.html">Admin</a>
+        <a href="/graph.html">Graph</a>
+        <a class="active" href="/agents.html">Agents</a>
+      </div>
+
+      <div class="section-title">Agents</div>
+      <div id="agentList" class="agent-list">
+        <div class="small-muted" style="padding: 12px;">Loading agents...</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <div class="page-title">Agent Runtime</div>
+          <div class="page-subtitle">Runs are filtered by backend-enforced source permissions.</div>
+        </div>
+        <div id="healthPill" class="status-pill">
+          <span class="dot warn"></span>
+          Checking Agent API...
+        </div>
+      </div>
+
+      <div class="workspace">
+        <section id="agentHeader" class="agent-header">
+          <h2>Select an agent</h2>
+          <p>Choose an agent from the left. The selected agent will only retrieve from assigned knowledge sources.</p>
+          <div class="instructions">No agent selected.</div>
+        </section>
+
+        <section id="answerPanel" class="answer-panel">
+          <div class="empty">
+            Select an agent, ask a task, and the answer will appear here with citations and run events.
+          </div>
+        </section>
+
+        <section class="composer">
+          <textarea id="taskInput" placeholder="Ask the selected agent. Example: What invoices need attention based on invoice rules and vendor data?"></textarea>
+          <div class="composer-actions">
+            <div id="composerHelp" class="input-help">Agent answers use only assigned sources.</div>
+            <div style="display:flex; gap:8px;">
+              <button class="secondary" id="clearBtn" type="button">Clear</button>
+              <button id="runBtn" type="button">Run Agent</button>
+            </div>
+          </div>
+          <div id="errorBox" class="error hidden"></div>
+        </section>
+      </div>
+    </main>
+
+    <aside class="right">
+      <div class="right-scroll">
+        <section class="side-panel">
+          <div class="side-panel-header">
+            <div class="side-panel-title">Assigned Sources</div>
+            <span id="sourceCount" class="badge">0</span>
+          </div>
+          <div id="sourcesPanel" class="side-panel-body">
+            <div class="small-muted">No agent selected.</div>
+          </div>
+        </section>
+
+        <section class="side-panel">
+          <div class="side-panel-header">
+            <div class="side-panel-title">Citations</div>
+            <span id="citationCount" class="badge">0</span>
+          </div>
+          <div id="citationsPanel" class="side-panel-body">
+            <div class="small-muted">No citations yet.</div>
+          </div>
+        </section>
+
+        <section class="side-panel">
+          <div class="side-panel-header">
+            <div class="side-panel-title">Run Timeline</div>
+            <button class="secondary" id="refreshEventsBtn" type="button" style="padding:6px 8px;font-size:11px;">Refresh</button>
+          </div>
+          <div id="eventsPanel" class="side-panel-body">
+            <div class="small-muted">No run yet.</div>
+          </div>
+        </section>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    const API_BASE = "";
+
+    const state = {
+      agents: [],
+      selectedAgent: null,
+      selectedSources: [],
+      lastRunId: null,
+      isRunning: false,
+    };
+
+    const el = {
+      agentList: document.getElementById("agentList"),
+      agentHeader: document.getElementById("agentHeader"),
+      healthPill: document.getElementById("healthPill"),
+      taskInput: document.getElementById("taskInput"),
+      runBtn: document.getElementById("runBtn"),
+      clearBtn: document.getElementById("clearBtn"),
+      errorBox: document.getElementById("errorBox"),
+      answerPanel: document.getElementById("answerPanel"),
+      sourcesPanel: document.getElementById("sourcesPanel"),
+      citationsPanel: document.getElementById("citationsPanel"),
+      eventsPanel: document.getElementById("eventsPanel"),
+      sourceCount: document.getElementById("sourceCount"),
+      citationCount: document.getElementById("citationCount"),
+      refreshEventsBtn: document.getElementById("refreshEventsBtn"),
+      composerHelp: document.getElementById("composerHelp"),
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function shortSource(path) {
+      const text = String(path || "unknown");
+      const parts = text.split("/");
+      return parts[parts.length - 1] || text;
+    }
+
+    function parseJson(value, fallback) {
+      if (!value) return fallback;
+      try {
+        return JSON.parse(value);
+      } catch {
+        return fallback;
+      }
+    }
+
+    function showError(message) {
+      el.errorBox.textContent = message;
+      el.errorBox.classList.remove("hidden");
+    }
+
+    function clearError() {
+      el.errorBox.textContent = "";
+      el.errorBox.classList.add("hidden");
+    }
+
+    async function fetchJson(url, options = {}) {
+      const res = await fetch(url, options);
+      const text = await res.text();
+
+      let data;
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        throw new Error(`Non-JSON response from ${url}\nHTTP ${res.status}\n${text.slice(0, 800)}`);
+      }
+
+      if (!res.ok) {
+        const detail = data.detail || data.error || JSON.stringify(data);
+        throw new Error(`HTTP ${res.status}: ${detail}`);
+      }
+
+      return data;
+    }
+
+    function setHealth(ok, text) {
+      el.healthPill.innerHTML = `
+        <span class="dot ${ok ? "ok" : "warn"}"></span>
+        ${escapeHtml(text)}
+      `;
+    }
+
+    async function loadHealth() {
+      try {
+        const data = await fetchJson(`${API_BASE}/agents/health`);
+        const runtime = data?.features?.agent_runtime ? "runtime on" : "runtime off";
+        setHealth(true, `Agent API OK · ${runtime}`);
+      } catch (err) {
+        setHealth(false, "Agent API unavailable");
+        showError(err.message);
+      }
+    }
+
+    function renderAgents() {
+      if (!state.agents.length) {
+        el.agentList.innerHTML = `<div class="small-muted" style="padding:12px;">No active agents found.</div>`;
+        return;
+      }
+
+      el.agentList.innerHTML = state.agents.map(agent => {
+        const meta = parseJson(agent.metadata_json, {});
+        const domain = meta.data_domain || agent.agent_type || "agent";
+        const active = state.selectedAgent?.agent_id === agent.agent_id ? "active" : "";
+
+        return `
+          <div class="agent-card ${active}" data-agent-id="${escapeHtml(agent.agent_id)}">
+            <div class="agent-name">${escapeHtml(agent.agent_name)}</div>
+            <div class="agent-description">${escapeHtml(agent.agent_description || "No description.")}</div>
+            <div class="badge-row">
+              <span class="badge ok">${escapeHtml(agent.status)}</span>
+              <span class="badge">${escapeHtml(domain)}</span>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      document.querySelectorAll(".agent-card").forEach(card => {
+        card.addEventListener("click", () => selectAgent(card.dataset.agentId));
+      });
+    }
+
+    async function loadAgents() {
+      const data = await fetchJson(`${API_BASE}/agents/agents?status=active`);
+      state.agents = data.agents || [];
+      renderAgents();
+
+      if (state.agents.length && !state.selectedAgent) {
+        await selectAgent(state.agents[0].agent_id);
+      }
+    }
+
+    async function selectAgent(agentId) {
+      clearError();
+      const agent = state.agents.find(item => item.agent_id === agentId);
+      if (!agent) return;
+
+      state.selectedAgent = agent;
+      state.lastRunId = null;
+      renderAgents();
+      renderAgentHeader(agent);
+      renderAnswerEmpty();
+      renderCitations([]);
+      renderEvents([]);
+      await loadAgentSources(agent.agent_id);
+    }
+
+    function renderAgentHeader(agent) {
+      const meta = parseJson(agent.metadata_json, {});
+      const domain = meta.data_domain || "unknown";
+
+      el.agentHeader.innerHTML = `
+        <h2>${escapeHtml(agent.agent_name)}</h2>
+        <p>${escapeHtml(agent.agent_description || "No description.")}</p>
+        <div class="badge-row">
+          <span class="badge ok">${escapeHtml(agent.status)}</span>
+          <span class="badge">${escapeHtml(domain)}</span>
+          <span class="badge">${escapeHtml(agent.agent_type)}</span>
+        </div>
+        <div class="instructions">
+          <strong>Instructions:</strong><br />
+          ${escapeHtml(agent.instructions || "No instructions configured.")}
+        </div>
+      `;
+
+      el.composerHelp.textContent = `Running ${agent.agent_name}. Retrieval is restricted to assigned sources.`;
+    }
+
+    async function loadAgentSources(agentId) {
+      const data = await fetchJson(`${API_BASE}/agents/agents/${agentId}/sources`);
+      state.selectedSources = data.sources || [];
+      renderSources(state.selectedSources, data.allowed_source_count || 0);
+    }
+
+    function renderSources(sources, allowedCount) {
+      el.sourceCount.textContent = `${sources.length}`;
+
+      if (!sources.length) {
+        el.sourcesPanel.innerHTML = `<div class="small-muted">This agent has no assigned sources.</div>`;
+        return;
+      }
+
+      el.sourcesPanel.innerHTML = sources.map(source => `
+        <div class="source-item">
+          <div class="source-name">${escapeHtml(source.source_name)}</div>
+          <div class="source-meta">
+            Domain: ${escapeHtml(source.data_domain)}<br />
+            Security: ${escapeHtml(source.security_level)}<br />
+            Connector: ${escapeHtml(source.connector)}<br />
+            Source ID: ${escapeHtml(source.knowledge_source_id)}
+          </div>
+        </div>
+      `).join("") + `
+        <div class="small-muted">Allowed file source IDs: ${escapeHtml(allowedCount)}</div>
+      `;
+    }
+
+    function renderAnswerEmpty() {
+      el.answerPanel.innerHTML = `
+        <div class="empty">
+          Ask ${escapeHtml(state.selectedAgent?.agent_name || "an agent")} a task.
+        </div>
+      `;
+    }
+
+    function renderRunning() {
+      el.answerPanel.innerHTML = `
+        <div class="answer-meta">
+          <span class="badge warn">running</span>
+          <span class="badge">retrieving assigned sources</span>
+          <span class="badge">generating with Ollama</span>
+        </div>
+        <div class="answer">Agent run in progress. This can take several seconds for CSV-heavy sources.</div>
+      `;
+    }
+
+    function renderAnswer(data) {
+      const agentName = data?.agent?.agent_name || state.selectedAgent?.agent_name || "Agent";
+      const latency = data?.latency_ms ? `${Math.round(data.latency_ms / 1000)}s` : "n/a";
+      const chunks = data?.retrieved_chunks ?? 0;
+      const model = data?.model || "unknown";
+
+      el.answerPanel.innerHTML = `
+        <div class="answer-meta">
+          <span class="badge ok">${escapeHtml(data.status || "completed")}</span>
+          <span class="badge">${escapeHtml(agentName)}</span>
+          <span class="badge">${escapeHtml(chunks)} chunks</span>
+          <span class="badge">${escapeHtml(latency)}</span>
+          <span class="badge">${escapeHtml(model)}</span>
+        </div>
+        <div class="answer">${escapeHtml(data.answer || "No answer returned.")}</div>
+      `;
+    }
+
+    function renderCitations(citations) {
+      el.citationCount.textContent = `${citations.length || 0}`;
+
+      if (!citations || !citations.length) {
+        el.citationsPanel.innerHTML = `<div class="small-muted">No citations yet.</div>`;
+        return;
+      }
+
+      el.citationsPanel.innerHTML = citations.map(citation => `
+        <div class="citation-item">
+          <div class="citation-source">[${escapeHtml(citation.citation_id)}] ${escapeHtml(shortSource(citation.source))}</div>
+          <div class="citation-meta">
+            Type: ${escapeHtml(citation.file_type || "unknown")}<br />
+            Chunk: ${escapeHtml(citation.chunk_index)}<br />
+            Score: ${escapeHtml(citation.score ?? "n/a")}<br />
+            Source ID: ${escapeHtml(citation.source_id)}
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function renderEvents(events) {
+      if (!events || !events.length) {
+        el.eventsPanel.innerHTML = `<div class="small-muted">No run events yet.</div>`;
+        return;
+      }
+
+      el.eventsPanel.innerHTML = events.map(event => {
+        const status = String(event.event_status || "info").toLowerCase();
+        return `
+          <div class="event-item ${escapeHtml(status)}">
+            <div class="event-type">${escapeHtml(event.event_type)}</div>
+            <div class="event-meta">
+              Status: ${escapeHtml(event.event_status)}<br />
+              ${escapeHtml(event.message)}<br />
+              ${escapeHtml(event.created_at || "")}
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    async function refreshEvents() {
+      if (!state.lastRunId) {
+        renderEvents([]);
+        return;
+      }
+
+      const data = await fetchJson(`${API_BASE}/agents/runs/${state.lastRunId}/events`);
+      renderEvents(data.events || []);
+    }
+
+    async function runSelectedAgent() {
+      clearError();
+
+      if (!state.selectedAgent) {
+        showError("Select an agent first.");
+        return;
+      }
+
+      const task = el.taskInput.value.trim();
+      if (!task) {
+        showError("Enter a task for the selected agent.");
+        return;
+      }
+
+      state.isRunning = true;
+      el.runBtn.disabled = true;
+      el.runBtn.textContent = "Running...";
+      renderRunning();
+      renderCitations([]);
+      renderEvents([]);
+
+      try {
+        const form = new FormData();
+        form.append("user_task", task);
+        form.append("tenant_id", "local");
+        form.append("user_id", "ashish");
+        form.append("limit", "8");
+
+        const data = await fetchJson(`${API_BASE}/agents/agents/${state.selectedAgent.agent_id}/run`, {
+          method: "POST",
+          body: form,
+        });
+
+        state.lastRunId = data.agent_run_id || null;
+        renderAnswer(data);
+        renderCitations(data.citations || []);
+        await refreshEvents();
+
+      } catch (err) {
+        showError(err.message);
+        el.answerPanel.innerHTML = `
+          <div class="empty">
+            Agent run failed. Check the error box below the composer and backend logs.
+          </div>
+        `;
+      } finally {
+        state.isRunning = false;
+        el.runBtn.disabled = false;
+        el.runBtn.textContent = "Run Agent";
+      }
+    }
+
+    function wireEvents() {
+      el.runBtn.addEventListener("click", runSelectedAgent);
+
+      el.clearBtn.addEventListener("click", () => {
+        el.taskInput.value = "";
+        clearError();
+        renderAnswerEmpty();
+        renderCitations([]);
+        renderEvents([]);
+      });
+
+      el.refreshEventsBtn.addEventListener("click", async () => {
+        try {
+          await refreshEvents();
+        } catch (err) {
+          showError(err.message);
+        }
+      });
+
+      el.taskInput.addEventListener("keydown", event => {
+        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+          runSelectedAgent();
+        }
+      });
+    }
+
+    async function init() {
+      wireEvents();
+      await loadHealth();
+      await loadAgents();
+    }
+
+    init().catch(err => {
+      showError(err.message);
+      setHealth(false, "Agent UI error");
+    });
+  </script>
+</body>
+</html>

@@ -17,7 +17,13 @@ from app.graph_store import GraphStore
 from app.incremental_ingest import collect_changed_files
 from app.metadata_db import MetadataDB
 from app.pdf_parser import parse_pdf_file, supports as supports_pdf
-from app.qdrant_client import QDRANT_COLLECTION, delete_points_by_source_id, ensure_collection, get_client, get_chunks_by_source_id
+from app.qdrant_client import (
+    QDRANT_COLLECTION,
+    delete_points_by_source_id,
+    ensure_collection,
+    get_chunks_by_source_id,
+    get_client,
+)
 from app.text_chunker import chunk_markdown, chunk_yaml, fixed_chunk_text
 from app.text_parser import parse_text_file, supports as supports_text
 
@@ -52,6 +58,8 @@ SUPPORTED_GENERIC_EXTENSIONS = {
     ".pdf",
     ".docx",
 }
+
+VALID_SECURITY_LEVELS = {"public", "internal", "confidential", "restricted"}
 
 
 def is_supported_file(path: Path) -> bool:
@@ -106,6 +114,55 @@ def _clean_chunks(chunks: list[str]) -> list[str]:
         if text:
             cleaned.append(text)
     return cleaned
+
+
+def _clean_text(value: str | None, default: str) -> str:
+    clean = (value or "").strip()
+    return clean or default
+
+
+def _clean_tags(tags: list[str] | None) -> list[str]:
+    clean_tags: list[str] = []
+    for tag in tags or []:
+        value = str(tag or "").strip()
+        if value and value not in clean_tags:
+            clean_tags.append(value)
+    return clean_tags
+
+
+def _normalise_ingest_metadata(
+    *,
+    source_type: str,
+    tenant_id: str = "local",
+    owner_user_id: str = "ashish",
+    source_group: str = "regular_chat",
+    connector: str | None = None,
+    data_domain: str = "general",
+    security_level: str = "internal",
+    tags: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+    agent_access_enabled: bool = False,
+    knowledge_source_id: str | None = None,
+) -> dict[str, Any]:
+    clean_security_level = _clean_text(security_level, "internal").lower()
+    if clean_security_level not in VALID_SECURITY_LEVELS:
+        clean_security_level = "internal"
+
+    clean_source_group = _clean_text(source_group, "regular_chat")
+    clean_data_domain = _clean_text(data_domain, "general")
+
+    return {
+        "tenant_id": _clean_text(tenant_id, "local"),
+        "owner_user_id": _clean_text(owner_user_id, "ashish"),
+        "source_group": clean_source_group,
+        "connector": _clean_text(connector or source_type, source_type or "file_upload"),
+        "data_domain": clean_data_domain,
+        "security_level": clean_security_level,
+        "tags": _clean_tags(tags),
+        "metadata": metadata or {},
+        "agent_access_enabled": bool(agent_access_enabled),
+        "knowledge_source_id": knowledge_source_id,
+    }
 
 
 def chunk_parsed_content(parsed: dict[str, Any]) -> list[dict[str, Any]]:
@@ -292,8 +349,48 @@ def build_graph_for_existing_source(
     }
 
 
-def ingest_paths(paths: list[str], source_type: str = "local") -> dict[str, Any]:
+def ingest_paths(
+    paths: list[str],
+    source_type: str = "local",
+    tenant_id: str = "local",
+    owner_user_id: str = "ashish",
+    source_group: str = "regular_chat",
+    connector: str | None = None,
+    data_domain: str = "general",
+    security_level: str = "internal",
+    tags: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+    agent_access_enabled: bool = False,
+    knowledge_source_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Ingests supported files into SQLite, Qdrant, and the graph store.
+
+    Backward-compatible defaults preserve current InfraRAG behaviour:
+    - source_group='regular_chat'
+    - data_domain='general'
+    - agent_access_enabled=False
+
+    Agent Studio ingestion should explicitly pass:
+    - source_group='agent_studio'
+    - data_domain='hr' / 'finance' / 'legal' / etc.
+    - agent_access_enabled=True
+    """
     metadata_db = MetadataDB()
+    ingest_metadata = _normalise_ingest_metadata(
+        source_type=source_type,
+        tenant_id=tenant_id,
+        owner_user_id=owner_user_id,
+        source_group=source_group,
+        connector=connector,
+        data_domain=data_domain,
+        security_level=security_level,
+        tags=tags,
+        metadata=metadata,
+        agent_access_enabled=agent_access_enabled,
+        knowledge_source_id=knowledge_source_id,
+    )
+
     all_files = discover_files(paths)
 
     deleted = []
@@ -320,6 +417,13 @@ def ingest_paths(paths: list[str], source_type: str = "local") -> dict[str, Any]
             "duplicate_files": [],
             "graph_built": [],
             "graph_failed": [],
+            "ingest_metadata": {
+                "tenant_id": ingest_metadata["tenant_id"],
+                "source_group": ingest_metadata["source_group"],
+                "data_domain": ingest_metadata["data_domain"],
+                "security_level": ingest_metadata["security_level"],
+                "agent_access_enabled": ingest_metadata["agent_access_enabled"],
+            },
         }
 
     client = get_client()
@@ -424,6 +528,15 @@ def ingest_paths(paths: list[str], source_type: str = "local") -> dict[str, Any]
                     "text": chunk_text,
                     "file_type": parsed.get("file_type", ""),
                     "parser_type": parsed.get("parser_type", ""),
+                    "tenant_id": ingest_metadata["tenant_id"],
+                    "owner_user_id": ingest_metadata["owner_user_id"],
+                    "source_group": ingest_metadata["source_group"],
+                    "connector": ingest_metadata["connector"],
+                    "data_domain": ingest_metadata["data_domain"],
+                    "security_level": ingest_metadata["security_level"],
+                    "tags": ingest_metadata["tags"],
+                    "agent_access_enabled": ingest_metadata["agent_access_enabled"],
+                    "knowledge_source_id": ingest_metadata["knowledge_source_id"],
                 }
 
                 if chunk_info.get("page_number") is not None:
@@ -474,6 +587,20 @@ def ingest_paths(paths: list[str], source_type: str = "local") -> dict[str, Any]
                 parser_type=parsed.get("parser_type", ""),
                 chunk_count=len(points),
                 status="active",
+                tenant_id=ingest_metadata["tenant_id"],
+                owner_user_id=ingest_metadata["owner_user_id"],
+                source_group=ingest_metadata["source_group"],
+                connector=ingest_metadata["connector"],
+                data_domain=ingest_metadata["data_domain"],
+                security_level=ingest_metadata["security_level"],
+                tags=ingest_metadata["tags"],
+                metadata={
+                    **ingest_metadata["metadata"],
+                    "source_name": Path(file_path).name,
+                    "source_parent": str(Path(file_path).parent),
+                },
+                agent_access_enabled=ingest_metadata["agent_access_enabled"],
+                knowledge_source_id=ingest_metadata["knowledge_source_id"],
             )
             metadata_db.replace_chunks(source_id=source_id, chunk_records=chunk_records)
 
@@ -486,6 +613,9 @@ def ingest_paths(paths: list[str], source_type: str = "local") -> dict[str, Any]
                     chunk_records=chunk_records,
                     chunks=chunks,
                 )
+                graph_result["source_group"] = ingest_metadata["source_group"]
+                graph_result["data_domain"] = ingest_metadata["data_domain"]
+                graph_result["agent_access_enabled"] = ingest_metadata["agent_access_enabled"]
                 graph_built.append(graph_result)
             except Exception as graph_exc:
                 logger.exception("Failed to build graph for file: %s", file_path)
@@ -519,4 +649,11 @@ def ingest_paths(paths: list[str], source_type: str = "local") -> dict[str, Any]
         "duplicate_files": duplicate_files,
         "graph_built": graph_built,
         "graph_failed": graph_failed,
+        "ingest_metadata": {
+            "tenant_id": ingest_metadata["tenant_id"],
+            "source_group": ingest_metadata["source_group"],
+            "data_domain": ingest_metadata["data_domain"],
+            "security_level": ingest_metadata["security_level"],
+            "agent_access_enabled": ingest_metadata["agent_access_enabled"],
+        },
     }

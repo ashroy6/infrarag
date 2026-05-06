@@ -26,6 +26,7 @@ from app.cancel_registry import cancel_request
 from app.chat_history import delete_conversation, get_messages, list_conversations, rename_conversation
 from app.rag_orchestrator import run_ask
 from app.qdrant_client import get_chunk_by_source_id_and_index
+from app.agents.agent_api import router as agent_router
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "140"))
 
 app = FastAPI(title="InfraRAG Backend", version="2.7.1")
 app.include_router(graph_router)
+app.include_router(agent_router)
 
 REQUEST_COUNT = Counter("infrarag_requests_total", "Total API requests", ["method", "endpoint", "status"])
 REQUEST_LATENCY = Histogram("infrarag_request_latency_seconds", "Request latency", ["endpoint"])
