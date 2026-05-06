@@ -15,6 +15,7 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/"
 CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2:3b")
 
 VERIFY_COMPLEX_ANSWERS = os.getenv("VERIFY_COMPLEX_ANSWERS", "true").lower() == "true"
+NORMAL_QA_DENIAL_VERIFIER_ENABLED = os.getenv("NORMAL_QA_DENIAL_VERIFIER_ENABLED", "true").lower() == "true"
 VERIFIER_TIMEOUT_SECONDS = int(os.getenv("VERIFIER_TIMEOUT_SECONDS", "90"))
 VERIFIER_NUM_PREDICT = int(os.getenv("VERIFIER_NUM_PREDICT", "800"))
 VERIFIER_MAX_CONTEXT_CHARS = int(os.getenv("VERIFIER_MAX_CONTEXT_CHARS", "9000"))
@@ -25,6 +26,38 @@ COMPLEX_PIPELINES = {
     "repo_explanation",
     "incident_runbook",
 }
+
+DENIAL_PHRASES = (
+    "no evidence found",
+    "no mention",
+    "not mentioned",
+    "not found",
+    "does not mention",
+    "doesn't mention",
+    "provided context does not",
+    "retrieved context does not",
+    "context does not support",
+    "there is no mention",
+    "there are no details",
+    "no relevant information",
+)
+
+
+def answer_denies_evidence(answer: str, citations: list[dict[str, Any]] | None = None) -> bool:
+    """
+    Generic guardrail.
+
+    Returns True when the model denies evidence even though retrieval produced citations.
+    This is intentionally not tied to any specific person, company, document, or topic.
+    """
+    if not citations:
+        return False
+
+    text = " ".join((answer or "").lower().split())
+    if not text:
+        return False
+
+    return any(phrase in text for phrase in DENIAL_PHRASES)
 
 
 def _limit_text(value: str, max_chars: int) -> str:
@@ -165,23 +198,23 @@ def should_verify_answer(
     answer: str = "",
     citations: list[dict[str, Any]] | None = None,
 ) -> bool:
-    # Normal Q&A must stay fast.
-    # Do not trigger verifier just because graph context adds more citations.
-    # Verifier remains enabled for complex pipelines only.
-    if pipeline_used == "normal_qa":
-        return False
-
-    if not VERIFY_COMPLEX_ANSWERS:
-        return False
+    routing = routing or {}
+    citations = citations or []
 
     if not answer.strip():
         return False
 
-    if answer.strip() == "No evidence found in the knowledge base.":
+    # Keep normal Q&A fast, but verify one important failure mode:
+    # retrieval found evidence, yet the model denies that evidence exists.
+    # This is generic and not hardcoded to any name/company/topic.
+    if pipeline_used == "normal_qa":
+        return NORMAL_QA_DENIAL_VERIFIER_ENABLED and answer_denies_evidence(answer, citations)
+
+    if not VERIFY_COMPLEX_ANSWERS:
         return False
 
-    routing = routing or {}
-    citations = citations or []
+    if answer.strip() == "No evidence found in the knowledge base.":
+        return False
 
     if pipeline_used in COMPLEX_PIPELINES:
         return True

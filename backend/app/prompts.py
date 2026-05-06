@@ -113,6 +113,12 @@ Do not invent facts.
 If the context does not support the answer, reply exactly:
 No evidence found in the knowledge base.
 
+Critical evidence rule:
+- Retrieved context has already been selected as potentially relevant evidence.
+- Before saying "No evidence found" or "not mentioned", inspect every retrieved chunk carefully.
+- If any retrieved chunk contains a matching person, company, role, project, date, skill, responsibility, tool, system, source, or relationship relevant to the question, answer from that evidence.
+- Do not deny evidence exists when relevant facts are present in the retrieved context.
+
 Rules:
 - Be concise and factual.
 - Prefer 4 to 8 sentences.
@@ -424,11 +430,13 @@ You must detect:
 - invented differences
 - invented files, commands, people, causes, outcomes, resources, or relationships
 - claims that are stronger than the evidence
+- false denial of evidence, such as saying "no mention", "not found", or "no evidence" when the retrieved context contains relevant facts
 - comparison claims using "both", "same", "similar", "difference", "all", or "always"
 
 Verdict rules:
 - Use "valid" if every important claim is supported.
-- Use "needs_revision" only if the draft contains unsupported or overgeneralised parts but a useful supported answer can still be written.
+- Use "needs_revision" if the draft contains unsupported or overgeneralised parts but a useful supported answer can still be written.
+- Use "needs_revision" if the draft falsely says there is no evidence, no mention, or no support, but the retrieved context contains relevant facts.
 - Use "insufficient_evidence" only if the retrieved context cannot support any useful answer.
 - If you remove, narrow, or rewrite unsupported parts, the verdict MUST be "needs_revision".
 - Do not use any other verdict.

@@ -8,7 +8,7 @@ import time
 from pathlib import PurePosixPath
 from typing import Any, Iterator
 
-from app.answer_verifier import should_verify_answer, verify_answer
+from app.answer_verifier import answer_denies_evidence, should_verify_answer, verify_answer
 from app.audit import save_audit_event
 from app.cancel_registry import cancel_reason, is_cancelled, register_request, unregister_request
 from app.chat_history import (
@@ -684,9 +684,9 @@ def stream_ask_events(
 
         answer = "".join(answer_parts).strip() or "No evidence found in the knowledge base."
 
-        if answer == "No evidence found in the knowledge base.":
-            citations = []
-
+        # Do not clear citations before verification.
+        # If the model falsely denies evidence while citations exist, the verifier needs
+        # both the draft answer and retrieved context to repair the answer.
         if cancelled():
             yield _sse("cancelled", cancel_payload("after_answer_generation"))
             return
@@ -700,7 +700,8 @@ def stream_ask_events(
 
         # Exact file/code explanation already retrieves one specific file by source_id.
         # Verification adds large latency and little value for this narrow case.
-        # Keep verifier enabled for repo-level, long explanation, incident, and normal higher-risk answers.
+        # For normal Q&A, verifier stays skipped unless the model denies evidence
+        # even though retrieval produced citations.
         if (not exact_file_mode) and should_verify_answer(
             pipeline_used=pipeline_used,
             routing=routing,
@@ -747,6 +748,9 @@ def stream_ask_events(
             if answer.strip() == "No evidence found in the knowledge base.":
                 citations = []
 
+            if answer_denies_evidence(answer, citations):
+                citations = []
+
             yield _sse(
                 "verification",
                 {
@@ -759,6 +763,12 @@ def stream_ask_events(
                     "progress_label": "Verification complete.",
                 },
             )
+
+        if answer.strip() == "No evidence found in the knowledge base.":
+            citations = []
+
+        if answer_denies_evidence(answer, citations):
+            citations = []
 
         if cancelled():
             yield _sse("cancelled", cancel_payload("before_save"))

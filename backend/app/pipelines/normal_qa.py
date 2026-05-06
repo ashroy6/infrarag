@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from app.answer_verifier import answer_denies_evidence, should_verify_answer, verify_answer
 from app.context_utils import build_citations, build_context_text, compact_chunks
 from app.llm_client import generate_text
 from app.prompts import NORMAL_QA_PROMPT
@@ -57,11 +58,41 @@ def run(
         num_predict=NORMAL_QA_NUM_PREDICT,
     )
 
+    verification_result: dict[str, Any] = {
+        "verification_verdict": "skipped",
+        "unsupported_claims": [],
+        "verification_reason": "Verifier skipped for this answer.",
+        "verified": False,
+    }
+
+    if should_verify_answer(
+        pipeline_used="normal_qa",
+        routing={"source_strategy": "cluster_by_best_source"},
+        answer=answer,
+        citations=citations,
+    ):
+        verification_result = verify_answer(
+            question=question,
+            pipeline_used="normal_qa",
+            context_text=context_text,
+            draft_answer=answer,
+        )
+
+        verdict = verification_result.get("verification_verdict")
+        corrected = str(verification_result.get("corrected_answer") or "").strip()
+
+        if verdict in {"needs_revision", "insufficient_evidence"} and corrected:
+            answer = corrected
+
     if answer.strip() == "No evidence found in the knowledge base.":
+        return no_evidence_response()
+
+    if answer_denies_evidence(answer, citations):
         return no_evidence_response()
 
     return {
         "answer": answer,
         "citations": citations,
         "verification_context_text": context_text,
+        **verification_result,
     }

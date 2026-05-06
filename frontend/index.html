@@ -945,15 +945,10 @@
 
     function persistChatState() {
       try {
-        const sourceSelect = document.getElementById("sourceSelect");
-        const graphToggle = document.getElementById("graphContextToggle");
-
         const state = {
           saved_at: Date.now(),
           currentConversationId,
           messages: Array.isArray(messages) ? messages.slice(-50) : [],
-          source_id: sourceSelect ? sourceSelect.value : "",
-          graph_context_enabled: graphToggle ? Boolean(graphToggle.checked) : false,
         };
 
         localStorage.setItem(CHAT_UI_STATE_KEY, JSON.stringify(state));
@@ -1014,17 +1009,32 @@
       return messages.length > 0;
     }
 
-    function restoreSourceSelection() {
-      const state = safeJsonParse(localStorage.getItem(CHAT_UI_STATE_KEY), null);
-      if (!state || !state.source_id) return;
+    function resetSourceFilters() {
+      const sourceSearch = document.getElementById("sourceSearch");
+      if (sourceSearch) {
+        sourceSearch.value = "";
+      }
+
+      const sourceTypeFilter = document.getElementById("sourceTypeFilter");
+      if (sourceTypeFilter) {
+        sourceTypeFilter.value = "";
+      }
 
       const sourceSelect = document.getElementById("sourceSelect");
-      if (!sourceSelect) return;
-
-      const exists = Array.from(sourceSelect.options).some(option => option.value === state.source_id);
-      if (exists) {
-        sourceSelect.value = state.source_id;
+      if (sourceSelect) {
+        sourceSelect.value = "";
       }
+
+      const graphToggle = document.getElementById("graphContextToggle");
+      if (graphToggle) {
+        graphToggle.checked = false;
+      }
+
+      renderSourceOptions();
+    }
+
+    function restoreSourceSelection() {
+      resetSourceFilters();
     }
 
     function clearChatState() {
@@ -1391,8 +1401,10 @@
       messages = [];
       clearChatState();
       clearQuestionDraft();
+      resetSourceFilters();
       renderMessages();
       renderConversationList();
+      persistChatState();
       document.getElementById("question").focus();
     }
 

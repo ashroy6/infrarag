@@ -4,6 +4,7 @@ requests
 qdrant-client
 prometheus-client
 pypdf
+python-docx
 python-multipart
 sentence-transformers
 torch
