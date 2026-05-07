@@ -1,0 +1,3337 @@
+===== backend/app/pipeline.py =====
+from __future__ import annotations
+
+import logging
+import os
+import uuid
+from pathlib import Path
+from typing import Any
+
+from qdrant_client.models import PointStruct
+
+from app.code_chunker import chunk_generic_code, chunk_python, chunk_terraform
+from app.code_parser import parse_code_file, supports as supports_code
+from app.delete_sync import sync_deleted_files
+from app.docx_parser import parse_docx_file, supports as supports_docx
+from app.embedding_service import get_embedding
+from app.graph_extractor import build_graph_for_file
+from app.graph_store import GraphStore
+from app.incremental_ingest import collect_changed_files
+from app.ingestion_progress import is_ingestion_cancelled, update_ingestion_progress
+from app.metadata_db import MetadataDB
+from app.pdf_parser import parse_pdf_file, supports as supports_pdf
+from app.qdrant_client import (
+    QDRANT_COLLECTION,
+    delete_points_by_source_id,
+    ensure_collection,
+    get_chunks_by_source_id,
+    get_client,
+)
+from app.text_chunker import chunk_markdown, chunk_yaml, fixed_chunk_text
+from app.text_parser import parse_text_file, supports as supports_text
+
+logger = logging.getLogger(__name__)
+
+LARGE_TEXT_THRESHOLD_BYTES = int(os.getenv("LARGE_TEXT_THRESHOLD_BYTES", "1000000"))
+LARGE_TEXT_CHUNK_SIZE = int(os.getenv("LARGE_TEXT_CHUNK_SIZE", "5000"))
+LARGE_TEXT_CHUNK_OVERLAP = int(os.getenv("LARGE_TEXT_CHUNK_OVERLAP", "500"))
+QDRANT_UPSERT_BATCH_SIZE = int(os.getenv("QDRANT_UPSERT_BATCH_SIZE", "100"))
+GRAPH_BUILD_MAX_CHUNKS_INLINE = int(os.getenv("GRAPH_BUILD_MAX_CHUNKS_INLINE", "500"))
+
+
+SUPPORTED_GENERIC_EXTENSIONS = {
+    ".md",
+    ".txt",
+    ".rst",
+    ".tf",
+    ".hcl",
+    ".py",
+    ".yml",
+    ".yaml",
+    ".json",
+    ".sh",
+    ".bash",
+    ".cfg",
+    ".ini",
+    ".conf",
+    ".env",
+    ".log",
+    ".csv",
+    ".sql",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".java",
+    ".go",
+    ".rs",
+    ".pdf",
+    ".docx",
+}
+
+VALID_SECURITY_LEVELS = {"public", "internal", "confidential", "restricted"}
+
+
+def is_supported_file(path: Path) -> bool:
+    if path.name.lower() == "dockerfile":
+        return True
+    return path.suffix.lower() in SUPPORTED_GENERIC_EXTENSIONS
+
+
+def discover_files(paths: list[str]) -> list[str]:
+    files: list[str] = []
+
+    for raw in paths:
+        p = Path(raw)
+        if p.is_file():
+            if is_supported_file(p):
+                files.append(str(p))
+        elif p.is_dir():
+            for item in p.rglob("*"):
+                if item.is_file() and is_supported_file(item):
+                    files.append(str(item))
+
+    seen = set()
+    unique_files = []
+    for file_path in files:
+        if file_path not in seen:
+            seen.add(file_path)
+            unique_files.append(file_path)
+
+    return unique_files
+
+
+def parse_file(path: str) -> dict[str, Any]:
+    if supports_pdf(path):
+        return parse_pdf_file(path)
+
+    if supports_docx(path):
+        return parse_docx_file(path)
+
+    if supports_code(path):
+        return parse_code_file(path)
+
+    if supports_text(path):
+        return parse_text_file(path)
+
+    raise ValueError(f"Unsupported file: {path}")
+
+
+def _clean_chunks(chunks: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for chunk in chunks:
+        text = (chunk or "").strip()
+        if text:
+            cleaned.append(text)
+    return cleaned
+
+
+def _clean_text(value: str | None, default: str) -> str:
+    clean = (value or "").strip()
+    return clean or default
+
+
+def _clean_tags(tags: list[str] | None) -> list[str]:
+    clean_tags: list[str] = []
+    for tag in tags or []:
+        value = str(tag or "").strip()
+        if value and value not in clean_tags:
+            clean_tags.append(value)
+    return clean_tags
+
+
+def _normalise_ingest_metadata(
+    *,
+    source_type: str,
+    tenant_id: str = "local",
+    owner_user_id: str = "ashish",
+    source_group: str = "regular_chat",
+    connector: str | None = None,
+    data_domain: str = "general",
+    security_level: str = "internal",
+    tags: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+    agent_access_enabled: bool = False,
+    knowledge_source_id: str | None = None,
+) -> dict[str, Any]:
+    clean_security_level = _clean_text(security_level, "internal").lower()
+    if clean_security_level not in VALID_SECURITY_LEVELS:
+        clean_security_level = "internal"
+
+    clean_source_group = _clean_text(source_group, "regular_chat")
+    clean_data_domain = _clean_text(data_domain, "general")
+
+    return {
+        "tenant_id": _clean_text(tenant_id, "local"),
+        "owner_user_id": _clean_text(owner_user_id, "ashish"),
+        "source_group": clean_source_group,
+        "connector": _clean_text(connector or source_type, source_type or "file_upload"),
+        "data_domain": clean_data_domain,
+        "security_level": clean_security_level,
+        "tags": _clean_tags(tags),
+        "metadata": metadata or {},
+        "agent_access_enabled": bool(agent_access_enabled),
+        "knowledge_source_id": knowledge_source_id,
+    }
+
+
+def chunk_parsed_content(parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    text = parsed["text"]
+    file_type = parsed.get("file_type", "")
+    parser_type = parsed.get("parser_type", "")
+
+    if parser_type == "pdf":
+        page_records = parsed.get("metadata", {}).get("pages", []) or []
+        page_chunks: list[dict[str, Any]] = []
+
+        for page in page_records:
+            page_number = page.get("page_number")
+            page_text = (page.get("text") or "").strip()
+            if not page_text:
+                continue
+
+            chunks = _clean_chunks(fixed_chunk_text(page_text))
+            for chunk in chunks:
+                page_chunks.append(
+                    {
+                        "text": chunk,
+                        "page_number": page_number,
+                        "page_start": page_number,
+                        "page_end": page_number,
+                    }
+                )
+
+        return page_chunks
+
+    if file_type == ".md":
+        chunks = _clean_chunks(chunk_markdown(text))
+    elif file_type in {".yml", ".yaml"}:
+        chunks = _clean_chunks(chunk_yaml(text))
+    elif file_type == ".py":
+        chunks = _clean_chunks(chunk_python(text))
+    elif file_type == ".tf":
+        chunks = _clean_chunks(chunk_terraform(text))
+    elif parser_type == "code":
+        chunks = _clean_chunks(chunk_generic_code(text))
+    elif file_type == ".txt" and len(text.encode("utf-8", errors="ignore")) >= LARGE_TEXT_THRESHOLD_BYTES:
+        chunks = _clean_chunks(
+            fixed_chunk_text(
+                text,
+                chunk_size=LARGE_TEXT_CHUNK_SIZE,
+                overlap=LARGE_TEXT_CHUNK_OVERLAP,
+            )
+        )
+    else:
+        chunks = _clean_chunks(fixed_chunk_text(text))
+
+    return [{"text": chunk} for chunk in chunks]
+
+
+def should_run_delete_sync(source_type: str) -> bool:
+    return source_type in {"local", "git"}
+
+
+def build_and_save_graph_for_ingested_file(
+    *,
+    source_id: str,
+    source_type: str,
+    source_path: str,
+    parsed: dict[str, Any],
+    chunk_records: list[dict[str, Any]],
+    chunks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    Builds graph rows immediately after a file is ingested.
+
+    This keeps graph generation source-scoped and idempotent:
+    same source_id -> old graph removed -> fresh graph inserted.
+    """
+    graph_chunks: list[dict[str, Any]] = []
+
+    for idx, chunk_info in enumerate(chunks):
+        chunk_text = (chunk_info.get("text") or "").strip()
+        if not chunk_text:
+            continue
+
+        matching_record = chunk_records[idx] if idx < len(chunk_records) else {}
+
+        graph_chunks.append(
+            {
+                "chunk_id": matching_record.get("chunk_id") or f"{source_id}:{idx}",
+                "chunk_index": idx,
+                "qdrant_point_id": matching_record.get("qdrant_point_id", ""),
+                "text": chunk_text,
+                "page_number": chunk_info.get("page_number"),
+                "page_start": chunk_info.get("page_start"),
+                "page_end": chunk_info.get("page_end"),
+            }
+        )
+
+    graph_payload = build_graph_for_file(
+        source_id=source_id,
+        source_type=source_type,
+        source_path=source_path,
+        file_type=parsed.get("file_type", ""),
+        parser_type=parsed.get("parser_type", ""),
+        chunks=graph_chunks,
+    )
+
+    store = GraphStore()
+    store.replace_source_graph(
+        source_id=source_id,
+        nodes=graph_payload.get("nodes", []),
+        edges=graph_payload.get("edges", []),
+    )
+
+    return {
+        "source_id": source_id,
+        "chunks": len(graph_chunks),
+        "nodes": len(graph_payload.get("nodes", [])),
+        "edges": len(graph_payload.get("edges", [])),
+    }
+
+
+def build_graph_for_existing_source(
+    *,
+    source_id: str,
+    source_type: str,
+    source_path: str,
+    file_type: str,
+    parser_type: str,
+) -> dict[str, Any]:
+    """
+    Builds or refreshes graph rows for an already-ingested source.
+
+    Used for duplicate uploads:
+    - duplicate file content is not re-ingested
+    - existing Qdrant chunks are reused
+    - missing/stale graph rows are rebuilt
+    """
+    existing_chunks = get_chunks_by_source_id(source_id)
+
+    if not existing_chunks:
+        return {
+            "source_id": source_id,
+            "source_path": source_path,
+            "chunks": 0,
+            "nodes": 0,
+            "edges": 0,
+            "status": "skipped_no_chunks",
+        }
+
+    graph_chunks: list[dict[str, Any]] = []
+
+    for chunk in existing_chunks:
+        try:
+            chunk_index = int(chunk.get("chunk_index") or 0)
+        except (TypeError, ValueError):
+            chunk_index = 0
+
+        graph_chunks.append(
+            {
+                "chunk_id": f"{source_id}:{chunk_index}",
+                "chunk_index": chunk_index,
+                "qdrant_point_id": "",
+                "text": chunk.get("text", ""),
+                "page_number": chunk.get("page_number"),
+                "page_start": chunk.get("page_start"),
+                "page_end": chunk.get("page_end"),
+            }
+        )
+
+    graph_chunks.sort(key=lambda item: int(item.get("chunk_index") or 0))
+
+    graph_payload = build_graph_for_file(
+        source_id=source_id,
+        source_type=source_type,
+        source_path=source_path,
+        file_type=file_type,
+        parser_type=parser_type,
+        chunks=graph_chunks,
+    )
+
+    store = GraphStore()
+    store.replace_source_graph(
+        source_id=source_id,
+        nodes=graph_payload.get("nodes", []),
+        edges=graph_payload.get("edges", []),
+    )
+
+    return {
+        "source_id": source_id,
+        "source_path": source_path,
+        "chunks": len(graph_chunks),
+        "nodes": len(graph_payload.get("nodes", [])),
+        "edges": len(graph_payload.get("edges", [])),
+        "status": "rebuilt_existing_duplicate_source",
+    }
+
+
+def ingest_paths(
+    paths: list[str],
+    source_type: str = "local",
+    tenant_id: str = "local",
+    owner_user_id: str = "ashish",
+    source_group: str = "regular_chat",
+    connector: str | None = None,
+    data_domain: str = "general",
+    security_level: str = "internal",
+    tags: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+    agent_access_enabled: bool = False,
+    knowledge_source_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Ingests supported files into SQLite, Qdrant, and the graph store.
+
+    Backward-compatible defaults preserve current InfraRAG behaviour:
+    - source_group='regular_chat'
+    - data_domain='general'
+    - agent_access_enabled=False
+
+    Agent Studio ingestion should explicitly pass:
+    - source_group='agent_studio'
+    - data_domain='hr' / 'finance' / 'legal' / etc.
+    - agent_access_enabled=True
+    """
+    metadata_db = MetadataDB()
+    ingest_metadata = _normalise_ingest_metadata(
+        source_type=source_type,
+        tenant_id=tenant_id,
+        owner_user_id=owner_user_id,
+        source_group=source_group,
+        connector=connector,
+        data_domain=data_domain,
+        security_level=security_level,
+        tags=tags,
+        metadata=metadata,
+        agent_access_enabled=agent_access_enabled,
+        knowledge_source_id=knowledge_source_id,
+    )
+
+    update_ingestion_progress(stage="discovering_files", total_units=0, processed_units=0, progress_percent=2)
+
+    all_files = discover_files(paths)
+
+    update_ingestion_progress(
+        stage="files_discovered",
+        total_units=len(all_files),
+        processed_units=0,
+        progress_percent=5,
+    )
+
+    deleted = []
+    if should_run_delete_sync(source_type):
+        deleted = sync_deleted_files(
+            source_type=source_type,
+            current_paths=all_files,
+            metadata_db=metadata_db,
+        )
+
+    changed_files = collect_changed_files(
+        source_type=source_type,
+        file_paths=all_files,
+        metadata_db=metadata_db,
+    )
+
+    if not changed_files:
+        return {
+            "message": "No new or changed files to ingest",
+            "total_discovered": len(all_files),
+            "changed_files": 0,
+            "deleted_sources": len(deleted),
+            "failed_files": [],
+            "duplicate_files": [],
+            "graph_built": [],
+            "graph_failed": [],
+            "ingest_metadata": {
+                "tenant_id": ingest_metadata["tenant_id"],
+                "source_group": ingest_metadata["source_group"],
+                "data_domain": ingest_metadata["data_domain"],
+                "security_level": ingest_metadata["security_level"],
+                "agent_access_enabled": ingest_metadata["agent_access_enabled"],
+            },
+        }
+
+    client = get_client()
+    total_files = 0
+    total_chunks = 0
+    vector_size = None
+    failed_files: list[dict[str, str]] = []
+    duplicate_files: list[dict[str, str]] = []
+    graph_built: list[dict[str, Any]] = []
+    graph_failed: list[dict[str, str]] = []
+
+    update_ingestion_progress(
+        stage="ingesting_files",
+        total_units=len(changed_files),
+        processed_units=0,
+        progress_percent=8,
+    )
+
+    for file_number, item in enumerate(changed_files, start=1):
+        if is_ingestion_cancelled():
+            raise RuntimeError("Ingestion cancelled")
+
+        file_path = item["path"]
+        source_id = item["source_id"]
+        file_hash = item["file_hash"]
+
+        try:
+            if source_type == "upload":
+                existing = metadata_db.get_active_file_by_hash(file_hash=file_hash, source_type="upload")
+                if existing and existing["source_path"] != file_path:
+                    existing_record = dict(existing)
+
+                    logger.info(
+                        "Skipping duplicate upload %s; already ingested as %s",
+                        file_path,
+                        existing_record.get("source_path", ""),
+                    )
+
+                    duplicate_info = {
+                        "path": file_path,
+                        "existing_source_id": existing_record.get("source_id", ""),
+                        "existing_source_path": existing_record.get("source_path", ""),
+                    }
+
+                    try:
+                        duplicate_graph_result = build_graph_for_existing_source(
+                            source_id=existing_record.get("source_id", ""),
+                            source_type=existing_record.get("source_type", source_type),
+                            source_path=existing_record.get("source_path", ""),
+                            file_type=existing_record.get("file_type", ""),
+                            parser_type=existing_record.get("parser_type", ""),
+                        )
+                        duplicate_graph_result["reason"] = "duplicate_upload_existing_source"
+                        graph_built.append(duplicate_graph_result)
+                        duplicate_info["graph_status"] = duplicate_graph_result.get("status", "unknown")
+                    except Exception as graph_exc:
+                        logger.exception(
+                            "Failed to build graph for duplicate existing source: %s",
+                            existing_record.get("source_path", ""),
+                        )
+                        graph_failed.append(
+                            {
+                                "path": existing_record.get("source_path", ""),
+                                "source_id": existing_record.get("source_id", ""),
+                                "error": str(graph_exc),
+                                "reason": "duplicate_upload_existing_source",
+                            }
+                        )
+                        duplicate_info["graph_status"] = "failed"
+
+                    Path(file_path).unlink(missing_ok=True)
+                    duplicate_files.append(duplicate_info)
+                    continue
+
+            update_ingestion_progress(
+                stage=f"parsing:{Path(file_path).name}",
+                total_units=len(changed_files),
+                processed_units=file_number - 1,
+                progress_percent=10,
+            )
+
+            parsed = parse_file(file_path)
+
+            update_ingestion_progress(
+                stage=f"chunking:{Path(file_path).name}",
+                total_units=len(changed_files),
+                processed_units=file_number - 1,
+                progress_percent=12,
+            )
+
+            chunks = chunk_parsed_content(parsed)
+
+            update_ingestion_progress(
+                stage=f"embedding:{Path(file_path).name}",
+                total_units=len(chunks),
+                processed_units=0,
+                progress_percent=15,
+            )
+
+            if not chunks:
+                logger.warning("Skipping file with no chunkable content: %s", file_path)
+                failed_files.append(
+                    {
+                        "path": file_path,
+                        "error": "No chunkable content produced",
+                    }
+                )
+                continue
+
+            delete_points_by_source_id(source_id)
+
+            points_batch: list[PointStruct] = []
+            chunk_records: list[dict[str, Any]] = []
+            total_points = 0
+            total_chunks_for_file = len(chunks)
+
+            for idx, chunk_info in enumerate(chunks):
+                if is_ingestion_cancelled():
+                    raise RuntimeError("Ingestion cancelled")
+
+                chunk_text = (chunk_info.get("text") or "").strip()
+                if not chunk_text:
+                    continue
+
+                embedding = get_embedding(chunk_text)
+
+                if vector_size is None:
+                    vector_size = len(embedding)
+                    ensure_collection(client, vector_size)
+
+                point_id = str(uuid.uuid4())
+                chunk_id = str(uuid.uuid4())
+
+                payload = {
+                    "source": file_path,
+                    "source_id": source_id,
+                    "source_type": source_type,
+                    "chunk_index": idx,
+                    "text": chunk_text,
+                    "file_type": parsed.get("file_type", ""),
+                    "parser_type": parsed.get("parser_type", ""),
+                    "tenant_id": ingest_metadata["tenant_id"],
+                    "owner_user_id": ingest_metadata["owner_user_id"],
+                    "source_group": ingest_metadata["source_group"],
+                    "connector": ingest_metadata["connector"],
+                    "data_domain": ingest_metadata["data_domain"],
+                    "security_level": ingest_metadata["security_level"],
+                    "tags": ingest_metadata["tags"],
+                    "agent_access_enabled": ingest_metadata["agent_access_enabled"],
+                    "knowledge_source_id": ingest_metadata["knowledge_source_id"],
+                }
+
+                if chunk_info.get("page_number") is not None:
+                    payload["page_number"] = chunk_info["page_number"]
+                if chunk_info.get("page_start") is not None:
+                    payload["page_start"] = chunk_info["page_start"]
+                if chunk_info.get("page_end") is not None:
+                    payload["page_end"] = chunk_info["page_end"]
+
+                points_batch.append(
+                    PointStruct(
+                        id=point_id,
+                        vector=embedding,
+                        payload=payload,
+                    )
+                )
+                total_points += 1
+
+===== backend/app/retrieve.py =====
+from __future__ import annotations
+
+import re
+from collections import defaultdict
+from typing import Any
+
+from app.embedding_service import get_embedding
+from app.graph_retrieval import expand_with_graph_context
+from app.qdrant_client import search
+from app.query_planner import plan_query
+from app.reranker import rerank_hits
+
+STOP_WORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "do", "does", "did", "what", "which", "who", "whom", "this", "that",
+    "these", "those", "and", "or", "but", "if", "then", "else", "for",
+    "to", "of", "in", "on", "at", "by", "with", "from", "as", "it", "its",
+    "about", "into", "over", "under", "than", "how", "why", "when", "where",
+    "can", "could", "should", "would", "will", "may", "might", "tell", "me",
+    "explain", "give", "show", "summarise", "summarize"
+}
+
+_PAGE_RANGE_RE = re.compile(
+    r"\bpages?\s+(\d+)\s*(?:-|to)\s*(\d+)\b|\bpage\s+(\d+)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _tokenize(text: str) -> list[str]:
+    normalized = _normalize_text(text)
+    tokens = re.findall(r"[a-zA-Z0-9_\-/.]+", normalized)
+    return [token for token in tokens if token not in STOP_WORDS and len(token) > 1]
+
+
+def _extract_page_range(query: str) -> tuple[int | None, int | None]:
+    match = _PAGE_RANGE_RE.search(query or "")
+    if not match:
+        return None, None
+
+    if match.group(1) and match.group(2):
+        start = int(match.group(1))
+        end = int(match.group(2))
+        return min(start, end), max(start, end)
+
+    if match.group(3):
+        page = int(match.group(3))
+        return page, page
+
+    return None, None
+
+
+def _source_key(hit: dict[str, Any]) -> str:
+    return str(hit.get("source_id") or hit.get("source") or "unknown")
+
+
+def _query_key(hit: dict[str, Any]) -> int:
+    try:
+        return int(hit.get("retrieval_query_index", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _dedupe_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen = set()
+    deduped = []
+
+    for hit in hits:
+        key = (
+            hit.get("source_id") or hit.get("source", ""),
+            hit.get("chunk_index", -1),
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        deduped.append(hit)
+
+    return deduped
+
+
+def _keyword_overlap_score(query: str, text: str, source: str) -> float:
+    query_terms = set(_tokenize(query))
+    if not query_terms:
+        return 0.0
+
+    haystack = set(_tokenize(f"{source}\n{text}"))
+    matched = query_terms.intersection(haystack)
+
+    if not matched:
+        return 0.0
+
+    return min(1.0, len(matched) / max(len(query_terms), 1))
+
+
+def _normalize_score(score: Any) -> float:
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return 0.0
+
+    return max(0.0, min(value, 1.0))
+
+
+def _hit_score(hit: dict[str, Any]) -> float:
+    for key in ("reranker_score", "score", "pre_cluster_score", "vector_score"):
+        if key in hit:
+            return _normalize_score(hit.get(key))
+    return 0.0
+
+
+def _source_cluster_scores(hits: list[dict[str, Any]]) -> dict[str, float]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for hit in hits:
+        groups[_source_key(hit)].append(hit)
+
+    scores_by_source: dict[str, float] = {}
+
+    for key, items in groups.items():
+        scores = sorted(
+            [_normalize_score(item.get("pre_cluster_score", item.get("score", 0.0))) for item in items],
+            reverse=True,
+        )
+
+        top_scores = scores[:5]
+        avg_top = sum(top_scores) / max(len(top_scores), 1)
+        max_score = max(scores) if scores else 0.0
+        count_bonus = min(len(items), 6) * 0.025
+
+        scores_by_source[key] = round((0.65 * avg_top) + (0.25 * max_score) + count_bonus, 6)
+
+    return scores_by_source
+
+
+def _best_source_per_query(hits: list[dict[str, Any]]) -> set[str]:
+    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+
+    for hit in hits:
+        grouped[_query_key(hit)].append(hit)
+
+    selected: set[str] = set()
+
+    for _, query_hits in grouped.items():
+        source_scores = _source_cluster_scores(query_hits)
+        if not source_scores:
+            continue
+
+        best_source = max(source_scores.items(), key=lambda item: item[1])[0]
+        selected.add(best_source)
+
+    return selected
+
+
+def _preserve_query_diversity(hits: list[dict[str, Any]], per_query: int) -> list[dict[str, Any]]:
+    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+
+    for hit in hits:
+        grouped[_query_key(hit)].append(hit)
+
+    preserved: list[dict[str, Any]] = []
+
+    for _, query_hits in grouped.items():
+        query_hits.sort(
+            key=lambda item: (
+                _normalize_score(item.get("pre_cluster_score", item.get("score", 0.0))),
+                _normalize_score(item.get("vector_score", 0.0)),
+            ),
+            reverse=True,
+        )
+        preserved.extend(query_hits[:per_query])
+
+    return _dedupe_hits(preserved)
+
+
+def _cluster_sources(hits: list[dict[str, Any]], strategy: str) -> list[dict[str, Any]]:
+    if not hits:
+        return []
+
+    source_scores = _source_cluster_scores(hits)
+
+    if not source_scores:
+        return []
+
+    ranked_sources = sorted(source_scores.items(), key=lambda item: item[1], reverse=True)
+
+    if strategy == "allow_multiple_sources":
+        selected_keys = set()
+
+        # Keep the strongest source per rewritten query so one topic cannot dominate.
+        selected_keys.update(_best_source_per_query(hits))
+
+        # Also keep a few globally strong source clusters.
+        selected_keys.update(key for key, _ in ranked_sources[:5])
+    else:
+        selected_keys = {ranked_sources[0][0]}
+
+    clustered: list[dict[str, Any]] = []
+
+    for hit in hits:
+        key = _source_key(hit)
+        if key not in selected_keys:
+            continue
+
+        item = dict(hit)
+        cluster_score = source_scores.get(key, 0.0)
+        item["source_cluster_score"] = cluster_score
+        item["score"] = round(
+            (0.78 * _normalize_score(item.get("score", 0.0))) + (0.22 * cluster_score),
+            6,
+        )
+        clustered.append(item)
+
+    clustered.sort(
+        key=lambda item: (
+            item.get("score", 0.0),
+            item.get("source_cluster_score", 0.0),
+            item.get("vector_score", 0.0),
+        ),
+        reverse=True,
+    )
+
+    return clustered
+
+
+def _diversify_final_hits(hits: list[dict[str, Any]], top_n: int, strategy: str) -> list[dict[str, Any]]:
+    if strategy != "allow_multiple_sources" or not hits:
+        return hits[:top_n]
+
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for hit in hits:
+        grouped[_source_key(hit)].append(hit)
+
+    for source_hits in grouped.values():
+        source_hits.sort(key=_hit_score, reverse=True)
+
+    ranked_sources = sorted(
+        grouped.keys(),
+        key=lambda source_id: _hit_score(grouped[source_id][0]),
+        reverse=True,
+    )
+
+    selected: list[dict[str, Any]] = []
+    seen = set()
+
+    # First pass: keep best hit from several sources.
+    for source_id in ranked_sources[: min(4, top_n)]:
+        hit = grouped[source_id][0]
+        key = (_source_key(hit), hit.get("chunk_index", -1))
+        if key not in seen:
+            seen.add(key)
+            selected.append(hit)
+
+    # Second pass: fill remaining slots by best overall score.
+    for hit in sorted(hits, key=_hit_score, reverse=True):
+        if len(selected) >= top_n:
+            break
+
+        key = (_source_key(hit), hit.get("chunk_index", -1))
+        if key in seen:
+            continue
+
+        seen.add(key)
+        selected.append(hit)
+
+    selected.sort(key=_hit_score, reverse=True)
+    return selected[:top_n]
+
+
+def _multi_query_search(
+    queries: list[str],
+    candidate_top_k: int,
+    source_id: str | None,
+    source: str | None,
+    source_type: str | None,
+    file_type: str | None,
+    page_start: int | None,
+    page_end: int | None,
+    allowed_source_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    all_hits: list[dict[str, Any]] = []
+
+    for query_index, retrieval_query in enumerate(queries):
+        query_vector = get_embedding(retrieval_query)
+
+        hits = search(
+            query_vector=query_vector,
+            limit=candidate_top_k,
+            source_id=source_id,
+            source=source,
+            source_type=source_type,
+            file_type=file_type,
+            page_start=page_start,
+            page_end=page_end,
+            allowed_source_ids=allowed_source_ids,
+        )
+
+        for hit in hits:
+            item = dict(hit)
+            vector_score = _normalize_score(hit.get("score", 0.0))
+            lexical_score = _keyword_overlap_score(
+                retrieval_query,
+                hit.get("text", "") or "",
+                hit.get("source", "") or "",
+            )
+
+            item["vector_score"] = vector_score
+            item["lexical_score"] = round(lexical_score, 6)
+            item["retrieval_query"] = retrieval_query
+            item["retrieval_query_index"] = query_index
+            item["pre_cluster_score"] = round((0.76 * vector_score) + (0.24 * lexical_score), 6)
+            item["score"] = item["pre_cluster_score"]
+
+            all_hits.append(item)
+
+    return _dedupe_hits(all_hits)
+
+
+def retrieve_context(
+    query: str,
+    limit: int = 5,
+    source_id: str | None = None,
+    source: str | None = None,
+    source_type: str | None = None,
+    file_type: str | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
+    retrieval_plan: dict[str, Any] | None = None,
+    use_graph_context: bool = False,
+    graph_max_chunks: int = 3,
+    allowed_source_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 50))
+
+    inferred_page_start, inferred_page_end = _extract_page_range(query)
+    if page_start is None:
+        page_start = inferred_page_start
+    if page_end is None:
+        page_end = inferred_page_end
+
+    plan = retrieval_plan or plan_query(query)
+
+    rewritten_queries = plan.get("rewritten_queries") or [query]
+    rewritten_queries = [
+        re.sub(r"\s+", " ", str(item or "").strip())
+        for item in rewritten_queries
+        if str(item or "").strip()
+    ]
+
+    if query not in rewritten_queries:
+        rewritten_queries.insert(0, query)
+
+    rewritten_queries = rewritten_queries[:5]
+
+    candidate_top_k = max(
+        safe_limit * 5,
+        int(plan.get("candidate_top_k", 40) or 40),
+    )
+    candidate_top_k = max(10, min(candidate_top_k, 80))
+
+    source_strategy = str(plan.get("source_strategy") or "cluster_by_best_source")
+
+    raw_hits = _multi_query_search(
+        queries=rewritten_queries,
+        candidate_top_k=candidate_top_k,
+        source_id=source_id,
+        source=source,
+        source_type=source_type,
+        file_type=file_type,
+        page_start=page_start,
+        page_end=page_end,
+        allowed_source_ids=allowed_source_ids,
+    )
+
+    if not raw_hits:
+        return []
+
+    if source_strategy == "allow_multiple_sources":
+        raw_hits = _preserve_query_diversity(
+            raw_hits,
+            per_query=max(8, safe_limit),
+        )
+
+    clustered_hits = _cluster_sources(raw_hits, source_strategy)
+
+    if not clustered_hits:
+        return []
+
+    final_top_k = max(safe_limit, int(plan.get("final_top_k", safe_limit) or safe_limit))
+    final_top_k = max(1, min(final_top_k, 12))
+
+    reranked = rerank_hits(
+        question=query,
+        hits=clustered_hits,
+        top_n=max(final_top_k * 2, final_top_k),
+    )
+
+    diversified = _diversify_final_hits(
+        reranked,
+        top_n=final_top_k,
+        strategy=source_strategy,
+    )
+
+    final_hits = diversified[:safe_limit]
+
+    if use_graph_context:
+        final_hits, graph_meta = expand_with_graph_context(
+            final_hits,
+            max_graph_chunks=graph_max_chunks,
+        )
+        for hit in final_hits:
+            hit.setdefault("graph_context_enabled", True)
+        if final_hits:
+            final_hits[0]["graph_context_meta"] = graph_meta
+
+    return final_hits
+===== backend/app/context_utils.py =====
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from app.metadata_db import MetadataDB
+from app.qdrant_client import get_chunks_by_source_id
+
+MAX_CONTEXT_CHARS_PER_CHUNK = int(os.getenv("MAX_CONTEXT_CHARS_PER_CHUNK", "1400"))
+MAX_TOTAL_CONTEXT_CHARS = int(os.getenv("MAX_TOTAL_CONTEXT_CHARS", "8000"))
+
+
+def trim_text(text: str, max_chars: int) -> str:
+    value = (text or "").strip()
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars].rstrip() + " ..."
+
+
+def compact_chunks(
+    chunks: list[dict[str, Any]],
+    max_chars_per_chunk: int = MAX_CONTEXT_CHARS_PER_CHUNK,
+    max_total_chars: int = MAX_TOTAL_CONTEXT_CHARS,
+) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    total_chars = 0
+
+    for chunk in chunks:
+        text = trim_text(chunk.get("text", ""), max_chars_per_chunk)
+        if not text:
+            continue
+
+        projected = total_chars + len(text)
+        if compacted and projected > max_total_chars:
+            break
+
+        item = dict(chunk)
+        item["text"] = text
+        compacted.append(item)
+        total_chars += len(text)
+
+    return compacted
+
+
+def build_context_text(chunks: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+
+    for chunk in chunks:
+        page_info = ""
+        if chunk.get("page_number") is not None:
+            page_info = f" | Page: {chunk['page_number']}"
+        elif chunk.get("page_start") is not None and chunk.get("page_end") is not None:
+            page_info = f" | Pages: {chunk['page_start']}-{chunk['page_end']}"
+
+        score = float(chunk.get("score", 0.0) or 0.0)
+
+        parts.append(
+            "[Source: {source} | Source ID: {source_id} | Chunk: {chunk_index}{page_info} | Score: {score:.4f}]\n{text}".format(
+                source=chunk.get("source", "unknown"),
+                source_id=chunk.get("source_id", ""),
+                chunk_index=chunk.get("chunk_index", -1),
+                page_info=page_info,
+                score=score,
+                text=chunk.get("text", ""),
+            )
+        )
+
+    return "\n\n".join(parts)
+
+
+def build_citations(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    citations: list[dict[str, Any]] = []
+
+    for idx, chunk in enumerate(chunks, start=1):
+        item: dict[str, Any] = {
+            "citation_id": idx,
+            "source": chunk.get("source", "unknown"),
+            "source_id": chunk.get("source_id", ""),
+            "chunk_index": chunk.get("chunk_index", -1),
+            "score": float(chunk.get("score", 0.0) or 0.0),
+            "file_type": chunk.get("file_type", ""),
+            "source_type": chunk.get("source_type", ""),
+        }
+
+        if chunk.get("page_number") is not None:
+            item["page_number"] = chunk.get("page_number")
+        if chunk.get("page_start") is not None:
+            item["page_start"] = chunk.get("page_start")
+        if chunk.get("page_end") is not None:
+            item["page_end"] = chunk.get("page_end")
+
+        citations.append(item)
+
+    return citations
+
+
+def resolve_source_id(source_id: str | None = None) -> str | None:
+    if source_id:
+        return source_id
+
+    db = MetadataDB()
+    latest = db.get_latest_active_source()
+    if latest:
+        return latest.get("source_id")
+
+    return None
+
+
+def load_all_source_chunks(source_id: str | None = None) -> tuple[str | None, list[dict[str, Any]]]:
+    resolved_source_id = resolve_source_id(source_id)
+    if not resolved_source_id:
+        return None, []
+
+    chunks = get_chunks_by_source_id(resolved_source_id)
+    return resolved_source_id, chunks
+===== backend/app/router.py =====
+from __future__ import annotations
+
+import re
+from typing import Any
+
+from app.query_planner import PIPELINE_LABELS, VALID_PIPELINES, plan_query
+
+
+def _safe_label(pipeline: str) -> str:
+    return PIPELINE_LABELS.get(pipeline, pipeline)
+
+
+def _base_response(
+    *,
+    pipeline: str,
+    question: str,
+    reason: str,
+    confidence: float = 0.9,
+    router: str = "rules_first",
+    answer_length: str = "balanced",
+    needs_all_chunks: bool = False,
+    candidate_top_k: int = 40,
+    final_top_k: int = 6,
+    source_strategy: str = "cluster_by_best_source",
+    question_type: str | None = None,
+    rewritten_queries: list[str] | None = None,
+) -> dict[str, Any]:
+    if pipeline not in VALID_PIPELINES:
+        pipeline = "normal_qa"
+
+    queries = rewritten_queries or [question]
+
+    return {
+        "intent": pipeline,
+        "pipeline_used": pipeline,
+        "pipeline_label": _safe_label(pipeline),
+        "answer_length": answer_length,
+        "needs_all_chunks": needs_all_chunks,
+        "confidence": confidence,
+        "reason": reason[:300],
+        "router": router,
+        "question_type": question_type,
+        "rewritten_queries": queries,
+        "candidate_top_k": candidate_top_k,
+        "final_top_k": final_top_k,
+        "source_strategy": source_strategy,
+        "answer_style": answer_length,
+        "planner": {
+            "pipeline_used": pipeline,
+            "pipeline": pipeline,
+            "answer_style": answer_length,
+            "needs_full_document": needs_all_chunks,
+            "confidence": confidence,
+            "reason": reason,
+            "router": router,
+            "question_type": question_type,
+            "rewritten_queries": queries,
+            "candidate_top_k": candidate_top_k,
+            "final_top_k": final_top_k,
+            "source_strategy": source_strategy,
+        },
+    }
+
+
+def _looks_like_file_question(q: str) -> bool:
+    file_markers = (
+        ".py",
+        ".js",
+        ".ts",
+        ".tsx",
+        ".jsx",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".md",
+        ".txt",
+        ".tf",
+        ".sh",
+        ".sql",
+        ".html",
+        ".css",
+        ".dockerfile",
+        "dockerfile",
+    )
+
+    action_markers = (
+        "explain",
+        "line by line",
+        "walk through",
+        "what does",
+        "how does",
+        "improve",
+        "review",
+        "summarize",
+        "summarise",
+        "analyse",
+        "analyze",
+        "describe",
+    )
+
+    return any(marker in q for marker in file_markers) and any(
+        marker in q for marker in action_markers
+    )
+
+
+def _looks_like_repo_question(q: str) -> bool:
+    repo_markers = (
+        "repo",
+        "repository",
+        "project",
+        "codebase",
+        "folder structure",
+        "directory structure",
+        "pipeline",
+        "workflow",
+        "architecture",
+        "how is this built",
+        "how does this app work",
+        "explain the app",
+        "explain this app",
+        "explain the project",
+        "explain this project",
+    )
+
+    action_markers = (
+        "explain",
+        "summarize",
+        "summarise",
+        "describe",
+        "walk through",
+        "what is",
+        "how does",
+        "architecture",
+    )
+
+    return any(marker in q for marker in repo_markers) and any(
+        marker in q for marker in action_markers
+    )
+
+
+def _looks_like_incident_question(q: str) -> bool:
+    incident_markers = (
+        "error",
+        "failed",
+        "failure",
+        "exception",
+        "traceback",
+        "timeout",
+        "502",
+        "500",
+        "404",
+        "not working",
+        "broken",
+        "troubleshoot",
+        "debug",
+        "why is this happening",
+        "request failed",
+    )
+
+    return any(marker in q for marker in incident_markers)
+
+
+def _looks_like_summary_question(q: str) -> bool:
+    """
+    Detect full-document, full-book, or full-source summary requests.
+
+    These should use document_summary because the user is asking to summarize
+    a complete source, not just a short topic.
+    """
+    summary_markers = (
+        "summarize this book",
+        "summarise this book",
+        "summarize the book",
+        "summarise the book",
+        "summarize this document",
+        "summarise this document",
+        "summarize the document",
+        "summarise the document",
+        "summarize full document",
+        "summarise full document",
+        "summary of this document",
+        "summary of the document",
+        "in 100 lines",
+        "in 50 lines",
+        "in 20 lines",
+        "full summary",
+        "whole book",
+        "entire book",
+        "whole document",
+        "entire document",
+    )
+
+    return any(marker in q for marker in summary_markers)
+
+
+def _looks_like_topic_summary(q: str) -> bool:
+    """
+    Detect short topic-summary requests and route them without calling the LLM planner.
+
+    These are not full-document/book summaries. They should use normal_qa unless
+    the user explicitly asks to summarize an entire document, book, source, or file.
+    """
+    return bool(
+        re.match(r"^\s*(summarize|summarise|summary\s+of)\s+.+", q, flags=re.IGNORECASE)
+    )
+
+
+def _looks_like_long_explanation(q: str) -> bool:
+    long_markers = (
+        "explain in detail",
+        "elaborate",
+        "elaborate the above",
+        "elaborate on the above",
+        "can you elaborate",
+        "explain more",
+        "explain it more",
+        "give more details",
+        "more details",
+        "tell me more",
+        "long explanation",
+        "detailed explanation",
+        "deep dive",
+        "step by step",
+        "in detail",
+    )
+
+    return any(marker in q for marker in long_markers)
+
+
+def _looks_like_numbered_followup(q: str) -> bool:
+    return bool(
+        re.match(
+            r"^\s*(can\s+you\s+)?(please\s+)?"
+            r"(explain|elaborate|expand|describe|summarize|summarise|tell\s+me\s+about|what\s+is|what\s+about)?\s*"
+            r"(the\s+)?(point|section|item|number|bullet|heading|part)\s*\d{1,3}"
+            r"(\s+(in\s+detail|more|again))?\s*[?.!]*\s*$",
+            q,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _looks_like_direct_factual_question(q: str) -> bool:
+    """
+    Fast-path simple factual/document questions.
+
+    These should not call the LLM planner. They only need normal retrieval + answer.
+    Generic examples:
+    - who is X
+    - what is X
+    - where is X
+    - list the names of X
+    - tell me about X from the CV/document
+    - what are the names/items/tools/projects/roles in source
+    """
+    clean = " ".join((q or "").lower().split())
+    if not clean:
+        return False
+
+    # Do not steal obvious specialist routes.
+    if _looks_like_summary_question(clean):
+        return False
+    if _looks_like_long_explanation(clean):
+        return False
+    if _looks_like_incident_question(clean):
+        return False
+    if _looks_like_file_question(clean):
+        return False
+
+    direct_patterns = (
+        r"^who\s+",
+        r"^what\s+",
+        r"^where\s+",
+        r"^when\s+",
+        r"^which\s+",
+        r"^list\s+",
+        r"^show\s+",
+        r"^give\s+me\s+",
+        r"^tell\s+me\s+about\s+",
+        r"^tell\s+me\s+",
+        r"^name\s+",
+        r"^names\s+of\s+",
+        r"^what\s+are\s+the\s+names\s+of\s+",
+        r"^what\s+are\s+",
+    )
+
+    if any(re.search(pattern, clean, flags=re.IGNORECASE) for pattern in direct_patterns):
+        return True
+
+    factual_markers = (
+        "from the cv",
+        "in the cv",
+        "from this cv",
+        "from the resume",
+        "in the resume",
+        "from this resume",
+        "from the document",
+        "in the document",
+        "from this document",
+        "names of",
+        "name of",
+        "list of",
+        "github repo",
+        "github repos",
+        "github repositories",
+        "experience at",
+        "experience in",
+    )
+
+    return any(marker in clean for marker in factual_markers)
+
+
+
+
+def decide_intent(question: str, chat_context: str = "") -> dict[str, Any]:
+    q = " ".join((question or "").lower().split())
+
+    # 1. Hard rules first. Do not waste time calling Ollama planner for obvious cases.
+
+    if _looks_like_file_question(q):
+        return _base_response(
+            pipeline="repo_explanation",
+            question=question,
+            reason="Rules-first router selected repo explanation because the question asks about a specific source/code file.",
+            confidence=0.95,
+            answer_length="detailed" if "line by line" in q else "balanced",
+            needs_all_chunks=True,
+            candidate_top_k=60,
+            final_top_k=12,
+            source_strategy="exact_or_best_source",
+            question_type="file_explanation",
+        )
+
+    if _looks_like_numbered_followup(q):
+        return _base_response(
+            pipeline="long_explanation",
+            question=question,
+            reason="Rules-first router selected long explanation because the question refers to a numbered point or section from the previous answer.",
+            confidence=0.9,
+            answer_length="long",
+            needs_all_chunks=False,
+            candidate_top_k=50,
+            final_top_k=10,
+            source_strategy="cluster_by_best_source",
+            question_type="numbered_followup",
+        )
+
+    if _looks_like_long_explanation(q):
+        return _base_response(
+            pipeline="long_explanation",
+            question=question,
+            reason="Rules-first router selected long explanation because the question asks for detailed elaboration.",
+            confidence=0.9,
+            answer_length="long",
+            needs_all_chunks=False,
+            candidate_top_k=50,
+            final_top_k=10,
+            source_strategy="cluster_by_best_source",
+            question_type="long_explanation",
+        )
+
+    if _looks_like_repo_question(q):
+        return _base_response(
+            pipeline="repo_explanation",
+            question=question,
+            reason="Rules-first router selected repo explanation because the question asks to explain a repo, project, workflow, architecture, or pipeline.",
+            confidence=0.9,
+            answer_length="detailed",
+            needs_all_chunks=False,
+            candidate_top_k=60,
+            final_top_k=10,
+            source_strategy="cluster_by_best_source",
+            question_type="repo_explanation",
+        )
+
+    if _looks_like_incident_question(q):
+        return _base_response(
+            pipeline="incident_runbook",
+            question=question,
+            reason="Rules-first router selected incident/runbook troubleshooting because the question contains an error, failure, timeout, or debugging signal.",
+            confidence=0.9,
+            answer_length="balanced",
+            needs_all_chunks=False,
+            candidate_top_k=50,
+            final_top_k=8,
+            source_strategy="cluster_by_best_source",
+            question_type="incident_or_debugging",
+        )
+
+    if _looks_like_summary_question(q):
+        return _base_response(
+            pipeline="document_summary",
+            question=question,
+            reason="Rules-first router selected document summary because the question asks for a full document or book summary.",
+            confidence=0.9,
+            answer_length="long",
+            needs_all_chunks=True,
+            candidate_top_k=80,
+            final_top_k=20,
+            source_strategy="single_source_all_chunks",
+            question_type="document_summary",
+        )
+
+    if _looks_like_topic_summary(q):
+        return _base_response(
+            pipeline="normal_qa",
+            question=question,
+            reason="Rules-first router selected normal Q&A because the question asks for a short topic summary, not a full document summary.",
+            confidence=0.85,
+            answer_length="balanced",
+            needs_all_chunks=False,
+            candidate_top_k=40,
+            final_top_k=6,
+            source_strategy="cluster_by_best_source",
+            question_type="topic_summary",
+        )
+
+    if _looks_like_direct_factual_question(q):
+        return _base_response(
+            pipeline="normal_qa",
+            question=question,
+            reason="Rules-first router selected normal Q&A because the question is a direct factual lookup.",
+            confidence=0.9,
+            answer_length="concise",
+            needs_all_chunks=False,
+            candidate_top_k=40,
+            final_top_k=6,
+            source_strategy="cluster_by_best_source",
+            question_type="direct_factual",
+        )
+
+    # 2. Only use LLM planner when hard rules do not clearly identify the intent.
+
+    try:
+        plan = plan_query(question, chat_context=chat_context)
+    except Exception as exc:
+        return _base_response(
+            pipeline="normal_qa",
+            question=question,
+            reason=f"Planner failed, so router used normal Q&A fallback: {type(exc).__name__}",
+            confidence=0.5,
+            router="planner_fallback",
+            answer_length="balanced",
+            needs_all_chunks=False,
+            candidate_top_k=40,
+            final_top_k=6,
+            source_strategy="cluster_by_best_source",
+            question_type="normal_qa",
+        )
+
+    pipeline = plan.get("pipeline_used") or plan.get("pipeline") or "normal_qa"
+    if pipeline not in VALID_PIPELINES:
+        pipeline = "normal_qa"
+
+    answer_style = plan.get("answer_style", "balanced")
+
+    return {
+        "intent": pipeline,
+        "pipeline_used": pipeline,
+        "pipeline_label": _safe_label(pipeline),
+        "answer_length": answer_style,
+        "needs_all_chunks": bool(plan.get("needs_full_document", False)),
+        "confidence": float(plan.get("confidence", 0.5)),
+        "reason": str(plan.get("reason", "Planned by local LLM."))[:300],
+        "router": plan.get("router", "llm_planner"),
+        "question_type": plan.get("question_type"),
+        "rewritten_queries": plan.get("rewritten_queries", [question]),
+        "candidate_top_k": plan.get("candidate_top_k", 40),
+        "final_top_k": plan.get("final_top_k", 6),
+        "source_strategy": plan.get("source_strategy", "cluster_by_best_source"),
+        "answer_style": answer_style,
+        "planner": plan,
+    }
+===== backend/app/qdrant_client.py =====
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointIdsList,
+    Range,
+    VectorParams,
+)
+
+logger = logging.getLogger(__name__)
+
+QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant")
+QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "infrarag_docs")
+
+_SCROLL_BATCH_SIZE = 1000
+_DELETE_BATCH_SIZE = 500
+
+
+def get_client() -> QdrantClient:
+    return QdrantClient(
+        host=QDRANT_HOST,
+        port=QDRANT_PORT,
+        check_compatibility=False,
+    )
+
+
+def collection_exists(client: QdrantClient) -> bool:
+    try:
+        collections = [c.name for c in client.get_collections().collections]
+        return QDRANT_COLLECTION in collections
+    except Exception:
+        logger.exception("Failed to check Qdrant collections")
+        return False
+
+
+def ensure_collection(client: QdrantClient, vector_size: int) -> None:
+    if collection_exists(client):
+        return
+
+    logger.info("Creating Qdrant collection '%s' with vector size %s", QDRANT_COLLECTION, vector_size)
+    client.create_collection(
+        collection_name=QDRANT_COLLECTION,
+        vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+    )
+
+
+def _build_filter(
+    source_id: str | None = None,
+    source: str | None = None,
+    source_type: str | None = None,
+    file_type: str | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
+    allowed_source_ids: list[str] | None = None,
+) -> Filter | None:
+    conditions: list[FieldCondition] = []
+    should_conditions: list[FieldCondition] = []
+
+    clean_allowed_source_ids = [
+        str(item).strip()
+        for item in (allowed_source_ids or [])
+        if str(item).strip()
+    ]
+
+    # If caller explicitly passes an empty allow-list, return no results.
+    if allowed_source_ids is not None and not clean_allowed_source_ids:
+        conditions.append(
+            FieldCondition(
+                key="source_id",
+                match=MatchValue(value="__NO_ALLOWED_SOURCES__"),
+            )
+        )
+
+    # If a source_id is requested inside an allow-list, enforce intersection.
+    # If source_id is outside the allow-list, force no result.
+    if source_id and clean_allowed_source_ids and source_id not in clean_allowed_source_ids:
+        conditions.append(
+            FieldCondition(
+                key="source_id",
+                match=MatchValue(value="__SOURCE_NOT_ALLOWED__"),
+            )
+        )
+
+    if not source_id and len(clean_allowed_source_ids) == 1:
+        conditions.append(
+            FieldCondition(
+                key="source_id",
+                match=MatchValue(value=clean_allowed_source_ids[0]),
+            )
+        )
+
+    if not source_id and len(clean_allowed_source_ids) > 1:
+        should_conditions.extend(
+            FieldCondition(key="source_id", match=MatchValue(value=item))
+            for item in clean_allowed_source_ids
+        )
+
+    if source_id:
+        conditions.append(FieldCondition(key="source_id", match=MatchValue(value=source_id)))
+
+    if source:
+        conditions.append(FieldCondition(key="source", match=MatchValue(value=source)))
+
+    if source_type:
+        conditions.append(FieldCondition(key="source_type", match=MatchValue(value=source_type)))
+
+    if file_type:
+        conditions.append(FieldCondition(key="file_type", match=MatchValue(value=file_type)))
+
+    if page_start is not None:
+        conditions.append(FieldCondition(key="page_number", range=Range(gte=page_start)))
+
+    if page_end is not None:
+        conditions.append(FieldCondition(key="page_number", range=Range(lte=page_end)))
+
+    if not conditions and not should_conditions:
+        return None
+
+    if should_conditions:
+        return Filter(must=conditions, should=should_conditions)
+
+    return Filter(must=conditions)
+
+
+def _payload_to_hit(item: Any) -> dict[str, Any]:
+    payload = item.payload or {}
+
+    return {
+        "score": getattr(item, "score", 1.0) or 1.0,
+        "source": payload.get("source", "unknown"),
+        "source_id": payload.get("source_id", ""),
+        "chunk_index": payload.get("chunk_index", -1),
+        "text": payload.get("text", ""),
+        "file_type": payload.get("file_type", ""),
+        "source_type": payload.get("source_type", ""),
+        "parser_type": payload.get("parser_type", ""),
+        "page_number": payload.get("page_number"),
+        "page_start": payload.get("page_start"),
+        "page_end": payload.get("page_end"),
+        "tenant_id": payload.get("tenant_id"),
+        "owner_user_id": payload.get("owner_user_id"),
+        "source_group": payload.get("source_group"),
+        "connector": payload.get("connector"),
+        "data_domain": payload.get("data_domain"),
+        "security_level": payload.get("security_level"),
+        "tags": payload.get("tags", []),
+        "agent_access_enabled": payload.get("agent_access_enabled"),
+        "knowledge_source_id": payload.get("knowledge_source_id"),
+    }
+
+
+def search(
+    query_vector: list[float],
+    limit: int = 5,
+    source_id: str | None = None,
+    source: str | None = None,
+    source_type: str | None = None,
+    file_type: str | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
+    allowed_source_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    client = get_client()
+
+    if not collection_exists(client):
+        logger.info("Qdrant collection '%s' does not exist yet; returning no search results", QDRANT_COLLECTION)
+        return []
+
+    search_filter = _build_filter(
+        source_id=source_id,
+        source=source,
+        source_type=source_type,
+        file_type=file_type,
+        page_start=page_start,
+        page_end=page_end,
+        allowed_source_ids=allowed_source_ids,
+    )
+
+    response = client.query_points(
+        collection_name=QDRANT_COLLECTION,
+        query=query_vector,
+        query_filter=search_filter,
+        limit=limit,
+    )
+
+    hits: list[dict[str, Any]] = []
+    for item in response.points:
+        hits.append(_payload_to_hit(item))
+
+    return hits
+
+
+def get_chunks_by_source_id(source_id: str) -> list[dict[str, Any]]:
+    """
+    Loads all chunk payloads for a source from Qdrant.
+
+    Used by full document/book summarisation.
+    This reads the actual full chunk text from Qdrant payload, not only SQLite previews.
+    """
+    client = get_client()
+
+    if not collection_exists(client):
+        logger.info("Qdrant collection '%s' does not exist yet; returning no chunks", QDRANT_COLLECTION)
+        return []
+
+    chunks: list[dict[str, Any]] = []
+    offset = None
+
+    while True:
+        points, next_offset = client.scroll(
+            collection_name=QDRANT_COLLECTION,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="source_id",
+                        match=MatchValue(value=source_id),
+                    )
+                ]
+            ),
+            limit=_SCROLL_BATCH_SIZE,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        for point in points:
+            chunks.append(_payload_to_hit(point))
+
+        if next_offset is None:
+            break
+
+        offset = next_offset
+
+    chunks.sort(key=lambda item: int(item.get("chunk_index", 0)))
+    return chunks
+
+
+def _scroll_source_point_ids(client: QdrantClient, source_id: str) -> list[Any]:
+    point_ids: list[Any] = []
+    offset = None
+
+    while True:
+        points, next_offset = client.scroll(
+            collection_name=QDRANT_COLLECTION,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="source_id",
+                        match=MatchValue(value=source_id),
+                    )
+                ]
+===== backend/app/metadata_db.py =====
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import uuid
+from pathlib import Path
+from typing import Any
+
+DB_PATH = os.getenv("METADATA_DB_PATH", "/app/data/infrarag.db")
+
+
+class MetadataDB:
+    def __init__(self, db_path: str | None = None):
+        self.db_path = db_path or DB_PATH
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 30000")
+        return conn
+
+    @staticmethod
+    def _json_dump(value: Any) -> str:
+        return json.dumps(value or {}, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _json_load(value: str | None) -> Any:
+        if not value:
+            return None
+        try:
+            return json.loads(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _tags_dump(tags: list[str] | None) -> str:
+        clean_tags = []
+        for tag in tags or []:
+            value = str(tag or "").strip()
+            if value and value not in clean_tags:
+                clean_tags.append(value)
+        return json.dumps(clean_tags, ensure_ascii=False)
+
+    def _table_columns(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return {str(row["name"]) for row in rows}
+
+    def _ensure_column(
+        self,
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        column_sql: str,
+    ) -> None:
+        columns = self._table_columns(conn, table_name)
+        if column_name not in columns:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_sql}")
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS files (
+                    source_id TEXT PRIMARY KEY,
+                    source_type TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    file_hash TEXT NOT NULL,
+                    file_type TEXT,
+                    parser_type TEXT,
+                    chunk_count INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'active',
+                    last_ingested_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            # Backward-compatible Agent Studio metadata on existing file records.
+            # Existing regular chat files remain valid and untouched.
+            self._ensure_column(conn, "files", "tenant_id", "tenant_id TEXT DEFAULT 'local'")
+            self._ensure_column(conn, "files", "owner_user_id", "owner_user_id TEXT DEFAULT 'ashish'")
+            self._ensure_column(conn, "files", "source_group", "source_group TEXT DEFAULT 'regular_chat'")
+            self._ensure_column(conn, "files", "connector", "connector TEXT DEFAULT 'file_upload'")
+            self._ensure_column(conn, "files", "data_domain", "data_domain TEXT DEFAULT 'general'")
+            self._ensure_column(conn, "files", "security_level", "security_level TEXT DEFAULT 'internal'")
+            self._ensure_column(conn, "files", "tags_json", "tags_json TEXT DEFAULT '[]'")
+            self._ensure_column(conn, "files", "metadata_json", "metadata_json TEXT DEFAULT '{}'")
+            self._ensure_column(conn, "files", "agent_access_enabled", "agent_access_enabled INTEGER DEFAULT 0")
+            self._ensure_column(conn, "files", "knowledge_source_id", "knowledge_source_id TEXT")
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS knowledge_sources (
+                    knowledge_source_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
+                    source_name TEXT NOT NULL,
+                    source_description TEXT,
+                    connector TEXT NOT NULL DEFAULT 'file_upload',
+                    source_group TEXT NOT NULL DEFAULT 'agent_studio',
+                    data_domain TEXT NOT NULL DEFAULT 'general',
+                    security_level TEXT NOT NULL DEFAULT 'internal',
+                    owner_user_id TEXT NOT NULL DEFAULT 'ashish',
+                    tags_json TEXT DEFAULT '[]',
+                    metadata_json TEXT DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agents (
+                    agent_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
+                    agent_name TEXT NOT NULL,
+                    agent_description TEXT,
+                    agent_type TEXT NOT NULL DEFAULT 'knowledge_agent',
+                    instructions TEXT,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    created_by TEXT NOT NULL DEFAULT 'ashish',
+                    metadata_json TEXT DEFAULT '{}',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_sources (
+                    agent_source_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
+                    agent_id TEXT NOT NULL,
+                    knowledge_source_id TEXT NOT NULL,
+                    access_level TEXT NOT NULL DEFAULT 'read',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(agent_id, knowledge_source_id),
+                    FOREIGN KEY(agent_id) REFERENCES agents(agent_id) ON DELETE CASCADE,
+                    FOREIGN KEY(knowledge_source_id) REFERENCES knowledge_sources(knowledge_source_id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    agent_run_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
+                    agent_id TEXT NOT NULL,
+                    conversation_id TEXT,
+                    user_id TEXT NOT NULL DEFAULT 'ashish',
+                    user_task TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'created',
+                    answer TEXT,
+                    sources_json TEXT,
+                    tools_json TEXT DEFAULT '[]',
+                    approval_status TEXT DEFAULT 'not_required',
+                    latency_ms INTEGER,
+                    error_message TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(agent_id) REFERENCES agents(agent_id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_run_events (
+                    event_id TEXT PRIMARY KEY,
+                    agent_run_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    event_status TEXT NOT NULL DEFAULT 'info',
+                    message TEXT NOT NULL,
+                    payload_json TEXT DEFAULT '{}',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(agent_run_id) REFERENCES agent_runs(agent_run_id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    qdrant_point_id TEXT NOT NULL,
+                    text_preview TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(source_id) REFERENCES files(source_id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversations (
+                    conversation_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    message_id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
+                    content TEXT NOT NULL,
+                    sources_json TEXT,
+                    intent TEXT,
+                    pipeline_used TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    audit_id TEXT PRIMARY KEY,
+                    conversation_id TEXT,
+                    question TEXT NOT NULL,
+                    answer TEXT NOT NULL,
+                    intent TEXT,
+                    pipeline_used TEXT,
+                    pipeline_label TEXT,
+                    confidence REAL,
+                    router_reason TEXT,
+                    sources_json TEXT,
+                    model TEXT,
+                    latency_ms INTEGER,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_source_id ON chunks(source_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_files_status ON files(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_files_source_type ON files(source_type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_files_file_hash ON files(file_hash)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_files_source_group ON files(source_group)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_files_data_domain ON files(data_domain)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_files_agent_access ON files(agent_access_enabled)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_files_knowledge_source_id ON files(knowledge_source_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_files_tenant_domain ON files(tenant_id, data_domain, source_group)")
+
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_sources_tenant ON knowledge_sources(tenant_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_sources_domain ON knowledge_sources(data_domain)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_sources_status ON knowledge_sources(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_sources_group ON knowledge_sources(source_group)")
+
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_agents_tenant ON agents(tenant_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_sources_agent_id ON agent_sources(agent_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_sources_ks_id ON agent_sources(knowledge_source_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_agent_id ON agent_runs(agent_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_run_events_run_id ON agent_run_events(agent_run_id)")
+
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations(updated_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation_id ON chat_messages(conversation_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at)")
+
+    # ---------------------------------------------------------------------
+    # File/source/chunk methods
+    # ---------------------------------------------------------------------
+
+    def upsert_file(
+        self,
+        source_id: str,
+        source_type: str,
+        source_path: str,
+        file_hash: str,
+        file_type: str,
+        parser_type: str,
+        chunk_count: int,
+        status: str = "active",
+        tenant_id: str = "local",
+        owner_user_id: str = "ashish",
+        source_group: str = "regular_chat",
+        connector: str | None = None,
+        data_domain: str = "general",
+        security_level: str = "internal",
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        agent_access_enabled: bool = False,
+        knowledge_source_id: str | None = None,
+    ) -> None:
+        clean_connector = connector or source_type or "file_upload"
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO files (
+                    source_id,
+                    source_type,
+                    source_path,
+                    file_hash,
+                    file_type,
+                    parser_type,
+                    chunk_count,
+                    status,
+                    last_ingested_at,
+                    last_seen_at,
+                    tenant_id,
+                    owner_user_id,
+                    source_group,
+                    connector,
+                    data_domain,
+                    security_level,
+                    tags_json,
+                    metadata_json,
+                    agent_access_enabled,
+                    knowledge_source_id
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                ON CONFLICT(source_id) DO UPDATE SET
+                    source_type=excluded.source_type,
+                    source_path=excluded.source_path,
+                    file_hash=excluded.file_hash,
+                    file_type=excluded.file_type,
+                    parser_type=excluded.parser_type,
+                    chunk_count=excluded.chunk_count,
+                    status=excluded.status,
+                    last_ingested_at=CURRENT_TIMESTAMP,
+                    last_seen_at=CURRENT_TIMESTAMP,
+                    tenant_id=excluded.tenant_id,
+                    owner_user_id=excluded.owner_user_id,
+                    source_group=excluded.source_group,
+                    connector=excluded.connector,
+                    data_domain=excluded.data_domain,
+                    security_level=excluded.security_level,
+                    tags_json=excluded.tags_json,
+                    metadata_json=excluded.metadata_json,
+                    agent_access_enabled=excluded.agent_access_enabled,
+                    knowledge_source_id=excluded.knowledge_source_id
+                """,
+                (
+                    source_id,
+                    source_type,
+                    source_path,
+                    file_hash,
+                    file_type,
+                    parser_type,
+                    chunk_count,
+                    status,
+                    tenant_id,
+                    owner_user_id,
+                    source_group,
+                    clean_connector,
+                    data_domain,
+                    security_level,
+                    self._tags_dump(tags),
+                    self._json_dump(metadata),
+                    1 if agent_access_enabled else 0,
+                    knowledge_source_id,
+                ),
+            )
+
+    def replace_chunks(
+        self,
+        source_id: str,
+        chunk_records: list[dict[str, Any]],
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM chunks WHERE source_id = ?", (source_id,))
+            conn.executemany(
+                """
+                INSERT INTO chunks (
+                    chunk_id, source_id, chunk_index, qdrant_point_id, text_preview
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        record["chunk_id"],
+                        source_id,
+                        record["chunk_index"],
+                        record["qdrant_point_id"],
+                        record["text_preview"],
+                    )
+                    for record in chunk_records
+                ],
+            )
+
+    def get_file(self, source_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM files WHERE source_id = ?", (source_id,)).fetchone()
+            return dict(row) if row else None
+
+    def get_active_file_by_hash(
+        self,
+        file_hash: str,
+        source_type: str | None = None,
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM files WHERE file_hash = ? AND status = 'active'"
+        params: list[Any] = [file_hash]
+
+        if source_type:
+            query += " AND source_type = ?"
+            params.append(source_type)
+
+        query += " ORDER BY last_ingested_at DESC LIMIT 1"
+
+        with self._connect() as conn:
+            row = conn.execute(query, params).fetchone()
+            return dict(row) if row else None
+
+    def list_active_files(
+        self,
+        source_type: str | None = None,
+        source_group: str | None = None,
+        data_domain: str | None = None,
+        agent_access_enabled: bool | None = None,
+        knowledge_source_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM files WHERE status = 'active'"
+        params: list[Any] = []
+
+        if source_type:
+            query += " AND source_type = ?"
+            params.append(source_type)
+
+        if source_group:
+            query += " AND source_group = ?"
+            params.append(source_group)
+
+        if data_domain:
+            query += " AND data_domain = ?"
+            params.append(data_domain)
+
+        if agent_access_enabled is not None:
+            query += " AND agent_access_enabled = ?"
+            params.append(1 if agent_access_enabled else 0)
+
+        if knowledge_source_id:
+            query += " AND knowledge_source_id = ?"
+            params.append(knowledge_source_id)
+
+        query += " ORDER BY last_ingested_at DESC"
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_latest_active_source(self) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM files
+                WHERE status = 'active'
+                ORDER BY last_ingested_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            return dict(row) if row else None
+
+    def mark_deleted(self, source_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE files
+                SET status = 'deleted', last_seen_at = CURRENT_TIMESTAMP
+                WHERE source_id = ?
+                """,
+                (source_id,),
+            )
+
+    def delete_file_and_chunks(self, source_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM chunks WHERE source_id = ?", (source_id,))
+            conn.execute("DELETE FROM files WHERE source_id = ?", (source_id,))
+
+    def get_chunks_for_source(self, source_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM chunks
+                WHERE source_id = ?
+                ORDER BY chunk_index ASC
+                """,
+                (source_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    # ---------------------------------------------------------------------
+    # Knowledge source methods
+    # ---------------------------------------------------------------------
+
+    def create_knowledge_source(
+        self,
+        source_name: str,
+        source_description: str | None = None,
+        tenant_id: str = "local",
+        connector: str = "file_upload",
+        source_group: str = "agent_studio",
+        data_domain: str = "general",
+        security_level: str = "internal",
+        owner_user_id: str = "ashish",
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        status: str = "active",
+        knowledge_source_id: str | None = None,
+    ) -> str:
+        ks_id = knowledge_source_id or str(uuid.uuid4())
+        clean_name = (source_name or "Knowledge Source").strip()[:200] or "Knowledge Source"
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO knowledge_sources (
+                    knowledge_source_id,
+                    tenant_id,
+                    source_name,
+                    source_description,
+                    connector,
+                    source_group,
+                    data_domain,
+                    security_level,
+                    owner_user_id,
+                    tags_json,
+                    metadata_json,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(knowledge_source_id) DO UPDATE SET
+                    tenant_id=excluded.tenant_id,
+                    source_name=excluded.source_name,
+                    source_description=excluded.source_description,
+                    connector=excluded.connector,
+                    source_group=excluded.source_group,
+                    data_domain=excluded.data_domain,
+                    security_level=excluded.security_level,
+                    owner_user_id=excluded.owner_user_id,
+                    tags_json=excluded.tags_json,
+                    metadata_json=excluded.metadata_json,
+                    status=excluded.status,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    ks_id,
+                    tenant_id,
+                    clean_name,
+                    source_description,
+                    connector,
+                    source_group,
+                    data_domain,
+                    security_level,
+                    owner_user_id,
+                    self._tags_dump(tags),
+                    self._json_dump(metadata),
+                    status,
+                ),
+            )
+
+        return ks_id
+
+    def get_knowledge_source(self, knowledge_source_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM knowledge_sources
+                WHERE knowledge_source_id = ?
+                """,
+                (knowledge_source_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_knowledge_sources(
+        self,
+        tenant_id: str = "local",
+        source_group: str | None = None,
+        data_domain: str | None = None,
+        status: str | None = "active",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 1000))
+        query = "SELECT * FROM knowledge_sources WHERE tenant_id = ?"
+        params: list[Any] = [tenant_id]
+
+        if source_group:
+            query += " AND source_group = ?"
+            params.append(source_group)
+
+        if data_domain:
+            query += " AND data_domain = ?"
+            params.append(data_domain)
+
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(safe_limit)
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
+===== backend/app/streaming_orchestrator.py =====
+from __future__ import annotations
+
+import json
+import os
+import re
+import sqlite3
+import time
+from pathlib import PurePosixPath
+from typing import Any, Iterator
+
+from app.answer_verifier import answer_denies_evidence, should_verify_answer, verify_answer
+from app.audit import save_audit_event
+from app.cancel_registry import cancel_reason, is_cancelled, register_request, unregister_request
+from app.chat_history import (
+    add_assistant_message,
+    add_user_message,
+    ensure_conversation,
+    get_recent_chat_context,
+)
+from app.context_utils import build_citations, build_context_text, compact_chunks
+from app.followup_resolver import resolve_followup_question
+from app.llm_client import CHAT_MODEL, LLMCancelled, generate_text, stream_generate_text
+from app.prompts import (
+    CODE_FILE_EXPLANATION_PROMPT,
+    DENIAL_RECOVERY_PROMPT,
+    INCIDENT_RUNBOOK_PROMPT,
+    LONG_EXPLANATION_PROMPT,
+    LONG_EXPLANATION_RETRY_PROMPT,
+    NORMAL_QA_PROMPT,
+    REPO_EXPLANATION_PROMPT,
+)
+from app.qdrant_client import get_chunks_by_source_id
+from app.rag_metrics import (
+    RAG_ANSWER_LATENCY_SECONDS,
+    RAG_GRAPH_CHUNKS_ADDED_TOTAL,
+    RAG_GRAPH_CONTEXT_ENABLED_TOTAL,
+    RAG_NO_EVIDENCE_TOTAL,
+    RAG_OLLAMA_TIMEOUT_TOTAL,
+    RAG_PIPELINE_TOTAL,
+    RAG_PLANNER_FALLBACK_TOTAL,
+    RAG_QUESTIONS_TOTAL,
+    RAG_VERIFIER_TOTAL,
+)
+from app.response_formatter import no_evidence_response
+from app.retrieve import retrieve_context
+from app.router import decide_intent
+from app.source_resolver import resolve_source_for_question
+from app.summary_jobs import start_document_summary_job
+
+MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "0.35"))
+
+NORMAL_QA_LIMIT = int(os.getenv("NORMAL_QA_LIMIT", "6"))
+LONG_EXPLANATION_LIMIT = int(os.getenv("LONG_EXPLANATION_LIMIT", "10"))
+REPO_EXPLANATION_LIMIT = int(os.getenv("REPO_EXPLANATION_LIMIT", "10"))
+INCIDENT_RUNBOOK_LIMIT = int(os.getenv("INCIDENT_RUNBOOK_LIMIT", "8"))
+
+NORMAL_QA_NUM_PREDICT = int(os.getenv("NORMAL_QA_NUM_PREDICT", "500"))
+LONG_EXPLANATION_NUM_PREDICT = int(os.getenv("LONG_EXPLANATION_NUM_PREDICT", "1400"))
+REPO_EXPLANATION_NUM_PREDICT = int(os.getenv("REPO_EXPLANATION_NUM_PREDICT", "1400"))
+CODE_FILE_NUM_PREDICT = int(os.getenv("CODE_FILE_NUM_PREDICT", "900"))
+INCIDENT_RUNBOOK_NUM_PREDICT = int(os.getenv("INCIDENT_RUNBOOK_NUM_PREDICT", "1200"))
+
+EXACT_FILE_LIMIT = int(os.getenv("EXACT_FILE_LIMIT", "50"))
+DEFAULT_DB_PATH = "/app/data/infrarag.db"
+
+FILE_PATTERN = re.compile(
+    r"(?P<file>[A-Za-z0-9_\-./]+(?:\.(?:py|js|ts|tsx|jsx|json|yaml|yml|md|txt|tf|sh|sql|html|css)|Dockerfile|dockerfile))",
+    re.IGNORECASE,
+)
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def normalize_question(question: str) -> str:
+    return re.sub(r"\s+", " ", (question or "").strip())
+
+
+def _db_path() -> str:
+    return (
+        os.getenv("INFRARAG_DB_PATH")
+        or os.getenv("METADATA_DB_PATH")
+        or os.getenv("DATABASE_PATH")
+        or DEFAULT_DB_PATH
+    )
+
+
+def _normalize_path(value: str) -> str:
+    return re.sub(r"/+", "/", (value or "").replace("\\", "/").strip().lower())
+
+
+def _basename(value: str) -> str:
+    normalized = _normalize_path(value)
+    if not normalized:
+        return ""
+    return PurePosixPath(normalized).name
+
+
+def _extract_requested_file(question: str) -> str | None:
+    match = FILE_PATTERN.search(question or "")
+    if not match:
+        return None
+
+    requested_file = match.group("file").strip().strip("`'\".,:;()[]{}")
+    return requested_file or None
+
+
+def _resolve_source_from_files_table(requested_file: str) -> dict[str, str] | None:
+    wanted = _normalize_path(requested_file)
+    wanted_base = _basename(wanted)
+
+    if not wanted and not wanted_base:
+        return None
+
+    db_file = _db_path()
+
+    try:
+        con = sqlite3.connect(db_file)
+        con.row_factory = sqlite3.Row
+    except Exception:
+        return None
+
+    try:
+        rows = con.execute(
+            """
+            SELECT source_id, source_path, status, file_type, source_type, chunk_count, last_ingested_at
+            FROM files
+            WHERE source_id IS NOT NULL
+              AND source_path IS NOT NULL
+              AND (
+                    LOWER(REPLACE(source_path, '\\', '/')) LIKE ?
+                 OR LOWER(REPLACE(source_path, '\\', '/')) LIKE ?
+              )
+            ORDER BY
+              CASE WHEN status = 'active' THEN 0 ELSE 1 END,
+              last_ingested_at DESC
+            LIMIT 100
+            """,
+            (f"%{wanted}%", f"%/{wanted_base}"),
+        ).fetchall()
+    except Exception:
+        return None
+    finally:
+        con.close()
+
+    if not rows:
+        return None
+
+    def rank(row: sqlite3.Row) -> tuple[int, int, int]:
+        source_path = _normalize_path(str(row["source_path"]))
+        source_base = _basename(source_path)
+        status = str(row["status"] or "")
+
+        active_rank = 0 if status == "active" else 1
+
+        if source_path == wanted:
+            match_rank = 0
+        elif source_path.endswith("/" + wanted):
+            match_rank = 1
+        elif source_base == wanted_base:
+            match_rank = 2
+        elif wanted in source_path:
+            match_rank = 3
+        else:
+            match_rank = 9
+
+        return active_rank, match_rank, len(source_path)
+
+    best = sorted(rows, key=rank)[0]
+
+    return {
+        "source_id": str(best["source_id"]),
+        "source_path": str(best["source_path"]),
+    }
+
+
+def _pipeline_limits(pipeline_used: str) -> tuple[int, int]:
+    if pipeline_used == "long_explanation":
+        return LONG_EXPLANATION_LIMIT, LONG_EXPLANATION_NUM_PREDICT
+
+    if pipeline_used == "repo_explanation":
+        return REPO_EXPLANATION_LIMIT, REPO_EXPLANATION_NUM_PREDICT
+
+    if pipeline_used == "incident_runbook":
+        return INCIDENT_RUNBOOK_LIMIT, INCIDENT_RUNBOOK_NUM_PREDICT
+
+    return NORMAL_QA_LIMIT, NORMAL_QA_NUM_PREDICT
+
+
+def _build_prompt(
+    pipeline_used: str,
+    question: str,
+    chat_context: str,
+    context_text: str,
+    exact_file_mode: bool = False,
+) -> str:
+    if pipeline_used == "long_explanation":
+        return LONG_EXPLANATION_PROMPT.format(
+            question=question,
+            chat_context=chat_context or "No recent conversation context.",
+            context_text=context_text,
+        )
+
+    if pipeline_used == "repo_explanation" and exact_file_mode:
+        return CODE_FILE_EXPLANATION_PROMPT.format(
+            question=question,
+            chat_context=chat_context or "No recent conversation context.",
+            context_text=context_text,
+        )
+
+    if pipeline_used == "repo_explanation":
+        return REPO_EXPLANATION_PROMPT.format(
+            question=question,
+            chat_context=chat_context or "No recent conversation context.",
+            context_text=context_text,
+        )
+
+    if pipeline_used == "incident_runbook":
+        return INCIDENT_RUNBOOK_PROMPT.format(
+            question=question,
+            chat_context=chat_context or "No recent conversation context.",
+            context_text=context_text,
+        )
+
+    return NORMAL_QA_PROMPT.format(
+        question=question,
+        context_text=context_text,
+    )
+
+
+def _long_answer_too_short(answer: str, pipeline_used: str, citations: list[dict[str, Any]]) -> bool:
+    if pipeline_used != "long_explanation":
+        return False
+
+    if not citations:
+        return False
+
+    clean = re.sub(r"\s+", " ", (answer or "").strip())
+    if not clean:
+        return True
+
+    # Generic completeness check:
+    # long_explanation should not return only one tiny section when evidence exists.
+    section_count = len(re.findall(r"(?m)^\s*\d+\.\s+", answer or ""))
+    word_count = len(re.findall(r"\b\w+\b", clean))
+
+    if word_count < 120:
+        return True
+
+    if section_count < 3:
+        return True
+
+    return False
+
+
+def _chunk_index(chunk: dict[str, Any]) -> int:
+    candidates: list[Any] = [
+        chunk.get("chunk_index"),
+        chunk.get("index"),
+        chunk.get("chunk"),
+    ]
+
+    metadata = chunk.get("metadata")
+    if isinstance(metadata, dict):
+        candidates.extend(
+            [
+                metadata.get("chunk_index"),
+                metadata.get("index"),
+                metadata.get("chunk"),
+            ]
+        )
+
+    payload = chunk.get("payload")
+    if isinstance(payload, dict):
+        candidates.extend(
+            [
+                payload.get("chunk_index"),
+                payload.get("index"),
+                payload.get("chunk"),
+            ]
+        )
+
+        payload_metadata = payload.get("metadata")
+        if isinstance(payload_metadata, dict):
+            candidates.extend(
+                [
+                    payload_metadata.get("chunk_index"),
+                    payload_metadata.get("index"),
+                    payload_metadata.get("chunk"),
+                ]
+            )
+
+    for value in candidates:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+
+    return 0
+
+
+def _is_file_explanation_question(question: str) -> bool:
+    if not _extract_requested_file(question):
+        return False
+
+    q = " ".join((question or "").lower().split())
+
+    intent_words = (
+        "explain",
+        "line by line",
+        "walk through",
+        "what does",
+        "how does",
+        "review",
+        "improve",
+        "summarize",
+        "summarise",
+        "analyse",
+        "analyze",
+        "describe",
+    )
+
+    return any(word in q for word in intent_words)
+
+
+def _exact_file_plan(requested_file: str) -> dict[str, Any]:
+    return {
+        "rewritten_queries": [requested_file],
+        "candidate_top_k": 80,
+        "final_top_k": 50,
+        "source_strategy": "cluster_by_best_source",
+        "router": "exact_file_source_id_lookup",
+        "question_type": "file_explanation",
+    }
+
+
+def _retrieve_exact_file_chunks(
+    *,
+    requested_file: str,
+    source_id: str | None = None,
+    source_type: str | None = None,
+    file_type: str | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, str] | None]:
+    resolved = None
+
+    if source_id:
+        resolved = {
+            "source_id": source_id,
+            "source_path": "",
+        }
+    else:
+        resolved = _resolve_source_from_files_table(requested_file)
+
+    if not resolved or not resolved.get("source_id"):
+        return [], None
+
+    # Exact file mode must not use retrieve_context().
+    # retrieve_context() performs embedding, vector search, clustering, and reranking.
+    # We already resolved the exact source_id from SQLite, so load all file chunks
+    # directly from Qdrant by source_id. This is faster and avoids unrelated context.
+    chunks = get_chunks_by_source_id(resolved["source_id"])
+
+    # Optional defensive filters. source_id should already be exact, but keep these
+    # so UI filters do not accidentally return unrelated source types/file types.
+    if source_type:
+        chunks = [chunk for chunk in chunks if chunk.get("source_type") == source_type]
+
+    if file_type:
+        chunks = [chunk for chunk in chunks if chunk.get("file_type") == file_type]
+
+    if page_start is not None:
+        chunks = [
+            chunk for chunk in chunks
+            if chunk.get("page_number") is None or int(chunk.get("page_number") or 0) >= page_start
+        ]
+
+    if page_end is not None:
+        chunks = [
+            chunk for chunk in chunks
+            if chunk.get("page_number") is None or int(chunk.get("page_number") or 0) <= page_end
+        ]
+
+    chunks.sort(key=_chunk_index)
+    return chunks, resolved
+
+
+def _exact_file_question_for_prompt(question: str, requested_file: str) -> str:
+    return (
+        f"{question}\n\n"
+        f"Important: Explain only the requested file `{requested_file}` using the retrieved file chunks. "
+        f"Do not explain README, Docker, GitHub Actions, CI/CD, dependencies, or repo-level workflow unless those details are inside this exact file. "
+        f"If the user asked line by line, explain the code in source order. "
+        f"If evidence is missing, say exactly what is missing."
+    )
+
+
+def stream_ask_events(
+    question: str,
+    conversation_id: str | None = None,
+    source_id: str | None = None,
+    source: str | None = None,
+    source_type: str | None = None,
+    file_type: str | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
+    request_id: str | None = None,
+    use_graph_context: bool = False,
+) -> Iterator[str]:
+    started = time.perf_counter()
+    request_id = register_request(request_id)
+
+    def cancelled() -> bool:
+        return is_cancelled(request_id)
+
+    def cancel_payload(stage: str) -> dict[str, Any]:
+        return {
+            "status": "cancelled",
+            "request_id": request_id,
+            "stage": stage,
+            "reason": cancel_reason(request_id) or "Cancelled by user.",
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    try:
+        normalized_question = normalize_question(question)
+
+        yield _sse(
+            "request",
+            {
+                "request_id": request_id,
+                "progress": 5,
+                "progress_label": "Request registered.",
+            },
+        )
+
+        resolved_conversation_id = ensure_conversation(conversation_id, normalized_question)
+        add_user_message(resolved_conversation_id, normalized_question)
+
+        if cancelled():
+            yield _sse("cancelled", cancel_payload("before_planning"))
+            return
+
+        chat_context = get_recent_chat_context(resolved_conversation_id, limit=10)
+
+        followup = resolve_followup_question(normalized_question, chat_context)
+        effective_question = followup.get("resolved_question") or normalized_question
+
+        source_resolution = resolve_source_for_question(
+            effective_question,
+            source_id=source_id,
+            source_type=source_type,
+            file_type=file_type,
+        )
+
+        if not source_id and source_resolution.get("source_id"):
+            source_id = str(source_resolution.get("source_id"))
+
+        routing = decide_intent(effective_question, chat_context=chat_context)
+        routing["original_question"] = normalized_question
+        routing["resolved_question"] = effective_question
+        routing["is_followup"] = followup.get("is_followup", False)
+        routing["followup_reason"] = followup.get("reason", "")
+
+        pipeline_used = routing.get("pipeline_used", "normal_qa")
+        RAG_PIPELINE_TOTAL.labels(pipeline=pipeline_used).inc()
+
+        router_name = str(routing.get("router") or "")
+        route_reason = str(routing.get("reason") or "")
+        if router_name == "planner_fallback":
+            RAG_PLANNER_FALLBACK_TOTAL.labels(reason="planner_fallback").inc()
+        if "timeout" in route_reason.lower() or "timed out" in route_reason.lower():
+            RAG_OLLAMA_TIMEOUT_TOTAL.labels(stage="planner").inc()
+        requested_file = _extract_requested_file(effective_question)
+        exact_file_mode = (
+            pipeline_used == "repo_explanation"
+            and requested_file is not None
+            and _is_file_explanation_question(effective_question)
+        )
+
+        if cancelled():
+            yield _sse("cancelled", cancel_payload("after_planning"))
+            return
+
+        yield _sse(
+            "meta",
+            {
+                "request_id": request_id,
+                "question": normalized_question,
+                "resolved_question": effective_question,
+                "is_followup": followup.get("is_followup", False),
+                "followup_reason": followup.get("reason", ""),
+                "conversation_id": resolved_conversation_id,
+                "pipeline_used": pipeline_used,
+                "pipeline_label": routing.get("pipeline_label"),
+                "intent": routing.get("intent"),
+                "intent_confidence": routing.get("confidence"),
+                "intent_reason": routing.get("reason"),
+                "router": routing.get("router"),
+                "question_type": routing.get("question_type"),
+                "source_strategy": routing.get("source_strategy"),
+                "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else ("vector_graph_search" if use_graph_context else "vector_search"),
+                "graph_context_enabled": bool(use_graph_context and not exact_file_mode),
+                "graph_chunks_added": 0,
+                "requested_file": requested_file,
+                "source_resolution_mode": source_resolution.get("mode"),
+                "source_resolution_reason": source_resolution.get("reason"),
+                "auto_source_id": source_resolution.get("source_id"),
+                "auto_source_path": source_resolution.get("source_path"),
+                "verification_verdict": "pending" if pipeline_used in {"long_explanation", "repo_explanation", "incident_runbook"} else "skipped",
+                "progress": 15,
+                "progress_label": "Planning complete. Searching evidence.",
+            },
+        )
+
+        if pipeline_used == "document_summary":
+            if cancelled():
+                yield _sse("cancelled", cancel_payload("before_summary_job"))
+                return
+
+            job_id = start_document_summary_job(
+                question=effective_question,
+                conversation_id=resolved_conversation_id,
+                routing=routing,
+                source_id=source_id,
+                page_start=page_start,
+                page_end=page_end,
+            )
+
+            yield _sse(
+                "summary_job",
+                {
+                    "request_id": request_id,
+                    "job_id": job_id,
+                    "conversation_id": resolved_conversation_id,
+                    "message": "Document summary job started.",
+                    "progress": 10,
+                    "progress_label": "Document summary job started.",
+                },
+            )
+            yield _sse("done", {"status": "summary_job_started", "job_id": job_id, "request_id": request_id})
+            return
+
+        retrieval_limit, num_predict = _pipeline_limits(pipeline_used)
+
+        # Exact file/code explanation should be smaller and faster than repo-wide explanation.
+        # It already uses exact chunks by source_id, so avoid oversized generation.
+        if exact_file_mode:
+            num_predict = CODE_FILE_NUM_PREDICT
+
+        if cancelled():
+            yield _sse("cancelled", cancel_payload("before_retrieval"))
+            return
+
+        resolved_file: dict[str, str] | None = None
+
+        if exact_file_mode and requested_file:
+            chunks, resolved_file = _retrieve_exact_file_chunks(
+                requested_file=requested_file,
+                source_id=source_id,
+                source_type=source_type,
+                file_type=file_type,
+                page_start=page_start,
+                page_end=page_end,
+            )
+        else:
+            retrieval_plan = routing.get("planner") or routing
+            chunks = retrieve_context(
+                effective_question,
+                limit=retrieval_limit,
+                source_id=source_id,
+                source=source,
+                source_type=source_type,
+                file_type=file_type,
+                page_start=page_start,
+                page_end=page_end,
+                retrieval_plan=retrieval_plan,
+                use_graph_context=bool(use_graph_context),
+                graph_max_chunks=3,
+            )
+
+        if cancelled():
+            yield _sse("cancelled", cancel_payload("after_retrieval"))
+            return
+
+        if not chunks:
+            RAG_NO_EVIDENCE_TOTAL.labels(pipeline=pipeline_used).inc()
+            answer = no_evidence_response()["answer"]
+            citations: list[dict[str, Any]] = []
+
+            yield _sse(
+                "citations",
+                {
+                    "citations": citations,
+                    "progress": 35,
+                    "progress_label": "No evidence found.",
+                    "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else "vector_search",
+                    "requested_file": requested_file,
+                    "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
+                    "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
+                    "retrieved_chunks": 0,
+                },
+            )
+            yield _sse("token", {"token": answer, "progress": 100, "progress_label": "Done."})
+
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            yield _sse(
+                "done",
+                {
+                    "status": "done",
+                    "request_id": request_id,
+                    "latency_ms": latency_ms,
+                    "citations": citations,
+                    "progress": 100,
+                    "progress_label": "Done.",
+                    "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else "vector_search",
+                    "requested_file": requested_file,
+                    "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
+===== grep results =====
+backend/app/state_store.py:20:def build_source_id(source_type: str, source_path: str) -> str:
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:21:from app.qdrant_client import delete_points_by_source_id
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:22:from app.retrieve import retrieve_context
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:29:from app.qdrant_client import get_chunk_by_source_id_and_index
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:177:            f"[Source: {chunk['source']} | Chunk: {chunk['chunk_index']}{page_info} | Score: {chunk.get('score', 0):.4f}]\n{chunk['text']}"
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:279:            "chunk_index": chunk["chunk_index"],
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:319:    source_id: str | None = None,
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:331:    hits = retrieve_context(
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:334:        source_id=source_id,
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:348:    source_id: str | None = None,
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:362:            source_id=source_id,
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:376:def get_citation(source_id: str = "", chunk_index: int = -1):
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:377:    if not source_id:
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:378:        raise InfraRAGError("source_id is required", status_code=400, code="missing_source_id")
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:380:    if chunk_index < 0:
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:381:        raise InfraRAGError("chunk_index must be >= 0", status_code=400, code="invalid_chunk_index")
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:383:    citation = get_chunk_by_source_id_and_index(source_id, chunk_index)
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:420:    source_id: str | None = None,
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:436:            source_id=source_id,
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:572:            source_id,
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:606:def admin_chunks(source_id: str, limit: int = 200):
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:607:    if not source_id:
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:608:        raise InfraRAGError("source_id is required", status_code=400, code="missing_source_id")
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:613:            SELECT source_id, source_type, source_path, file_type, parser_type, chunk_count, status
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:615:            WHERE source_id = ?
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:617:            (source_id,),
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:625:            SELECT chunk_id, source_id, chunk_index, qdrant_point_id, text_preview, created_at
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:627:            WHERE source_id = ?
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:628:            ORDER BY chunk_index ASC
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:631:            (source_id, limit),
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:662:def admin_delete_source(source_id: str):
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:663:    if not source_id:
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:664:        raise InfraRAGError("source_id is required", status_code=400, code="missing_source_id")
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:667:    record = metadata_db.get_file(source_id)
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:672:    delete_points_by_source_id(source_id)
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:673:    metadata_db.delete_file_and_chunks(source_id)
+backend/app/main.py.bak.ingestion_recovery.20260506_175706:677:        "source_id": source_id,
+backend/app/context_utils.py:7:from app.qdrant_client import get_chunks_by_source_id
+backend/app/context_utils.py:58:            "[Source: {source} | Source ID: {source_id} | Chunk: {chunk_index}{page_info} | Score: {score:.4f}]\n{text}".format(
+backend/app/context_utils.py:60:                source_id=chunk.get("source_id", ""),
+backend/app/context_utils.py:61:                chunk_index=chunk.get("chunk_index", -1),
+backend/app/context_utils.py:78:            "source_id": chunk.get("source_id", ""),
+backend/app/context_utils.py:79:            "chunk_index": chunk.get("chunk_index", -1),
+backend/app/context_utils.py:97:def resolve_source_id(source_id: str | None = None) -> str | None:
+backend/app/context_utils.py:98:    if source_id:
+backend/app/context_utils.py:99:        return source_id
+backend/app/context_utils.py:104:        return latest.get("source_id")
+backend/app/context_utils.py:109:def load_all_source_chunks(source_id: str | None = None) -> tuple[str | None, list[dict[str, Any]]]:
+backend/app/context_utils.py:110:    resolved_source_id = resolve_source_id(source_id)
+backend/app/context_utils.py:111:    if not resolved_source_id:
+backend/app/context_utils.py:114:    chunks = get_chunks_by_source_id(resolved_source_id)
+backend/app/context_utils.py:115:    return resolved_source_id, chunks
+backend/app/audit.py:26:        pipeline_label=routing.get("pipeline_label"),
+backend/app/main.py.bak.async_ingest.20260506_174652:20:from app.qdrant_client import delete_points_by_source_id
+backend/app/main.py.bak.async_ingest.20260506_174652:21:from app.retrieve import retrieve_context
+backend/app/main.py.bak.async_ingest.20260506_174652:28:from app.qdrant_client import get_chunk_by_source_id_and_index
+backend/app/main.py.bak.async_ingest.20260506_174652:176:            f"[Source: {chunk['source']} | Chunk: {chunk['chunk_index']}{page_info} | Score: {chunk.get('score', 0):.4f}]\n{chunk['text']}"
+backend/app/main.py.bak.async_ingest.20260506_174652:278:            "chunk_index": chunk["chunk_index"],
+backend/app/main.py.bak.async_ingest.20260506_174652:318:    source_id: str | None = None,
+backend/app/main.py.bak.async_ingest.20260506_174652:330:    hits = retrieve_context(
+backend/app/main.py.bak.async_ingest.20260506_174652:333:        source_id=source_id,
+backend/app/main.py.bak.async_ingest.20260506_174652:347:    source_id: str | None = None,
+backend/app/main.py.bak.async_ingest.20260506_174652:361:            source_id=source_id,
+backend/app/main.py.bak.async_ingest.20260506_174652:375:def get_citation(source_id: str = "", chunk_index: int = -1):
+backend/app/main.py.bak.async_ingest.20260506_174652:376:    if not source_id:
+backend/app/main.py.bak.async_ingest.20260506_174652:377:        raise InfraRAGError("source_id is required", status_code=400, code="missing_source_id")
+backend/app/main.py.bak.async_ingest.20260506_174652:379:    if chunk_index < 0:
+backend/app/main.py.bak.async_ingest.20260506_174652:380:        raise InfraRAGError("chunk_index must be >= 0", status_code=400, code="invalid_chunk_index")
+backend/app/main.py.bak.async_ingest.20260506_174652:382:    citation = get_chunk_by_source_id_and_index(source_id, chunk_index)
+backend/app/main.py.bak.async_ingest.20260506_174652:419:    source_id: str | None = None,
+backend/app/main.py.bak.async_ingest.20260506_174652:435:            source_id=source_id,
+backend/app/main.py.bak.async_ingest.20260506_174652:550:            source_id,
+backend/app/main.py.bak.async_ingest.20260506_174652:584:def admin_chunks(source_id: str, limit: int = 200):
+backend/app/main.py.bak.async_ingest.20260506_174652:585:    if not source_id:
+backend/app/main.py.bak.async_ingest.20260506_174652:586:        raise InfraRAGError("source_id is required", status_code=400, code="missing_source_id")
+backend/app/main.py.bak.async_ingest.20260506_174652:591:            SELECT source_id, source_type, source_path, file_type, parser_type, chunk_count, status
+backend/app/main.py.bak.async_ingest.20260506_174652:593:            WHERE source_id = ?
+backend/app/main.py.bak.async_ingest.20260506_174652:595:            (source_id,),
+backend/app/main.py.bak.async_ingest.20260506_174652:603:            SELECT chunk_id, source_id, chunk_index, qdrant_point_id, text_preview, created_at
+backend/app/main.py.bak.async_ingest.20260506_174652:605:            WHERE source_id = ?
+backend/app/main.py.bak.async_ingest.20260506_174652:606:            ORDER BY chunk_index ASC
+backend/app/main.py.bak.async_ingest.20260506_174652:609:            (source_id, limit),
+backend/app/main.py.bak.async_ingest.20260506_174652:639:def admin_delete_source(source_id: str):
+backend/app/main.py.bak.async_ingest.20260506_174652:640:    if not source_id:
+backend/app/main.py.bak.async_ingest.20260506_174652:641:        raise InfraRAGError("source_id is required", status_code=400, code="missing_source_id")
+backend/app/main.py.bak.async_ingest.20260506_174652:644:    record = metadata_db.get_file(source_id)
+backend/app/main.py.bak.async_ingest.20260506_174652:649:    delete_points_by_source_id(source_id)
+backend/app/main.py.bak.async_ingest.20260506_174652:650:    metadata_db.delete_file_and_chunks(source_id)
+backend/app/main.py.bak.async_ingest.20260506_174652:654:        "source_id": source_id,
+backend/app/incremental_ingest.py:6:from app.state_store import build_source_id, sha256_file
+backend/app/incremental_ingest.py:10:    source_id = build_source_id(source_type, source_path)
+backend/app/incremental_ingest.py:12:    existing = metadata_db.get_file(source_id)
+backend/app/incremental_ingest.py:36:                    "source_id": build_source_id(source_type, str(p)),
+backend/app/qdrant_client.py:57:    source_id: str | None = None,
+backend/app/qdrant_client.py:63:    allowed_source_ids: list[str] | None = None,
+backend/app/qdrant_client.py:68:    clean_allowed_source_ids = [
+backend/app/qdrant_client.py:70:        for item in (allowed_source_ids or [])
+backend/app/qdrant_client.py:75:    if allowed_source_ids is not None and not clean_allowed_source_ids:
+backend/app/qdrant_client.py:78:                key="source_id",
+backend/app/qdrant_client.py:83:    # If a source_id is requested inside an allow-list, enforce intersection.
+backend/app/qdrant_client.py:84:    # If source_id is outside the allow-list, force no result.
+backend/app/qdrant_client.py:85:    if source_id and clean_allowed_source_ids and source_id not in clean_allowed_source_ids:
+backend/app/qdrant_client.py:88:                key="source_id",
+backend/app/qdrant_client.py:93:    if not source_id and len(clean_allowed_source_ids) == 1:
+backend/app/qdrant_client.py:96:                key="source_id",
+backend/app/qdrant_client.py:97:                match=MatchValue(value=clean_allowed_source_ids[0]),
+backend/app/qdrant_client.py:101:    if not source_id and len(clean_allowed_source_ids) > 1:
+backend/app/qdrant_client.py:103:            FieldCondition(key="source_id", match=MatchValue(value=item))
+backend/app/qdrant_client.py:104:            for item in clean_allowed_source_ids
+backend/app/qdrant_client.py:107:    if source_id:
+backend/app/qdrant_client.py:108:        conditions.append(FieldCondition(key="source_id", match=MatchValue(value=source_id)))
+backend/app/qdrant_client.py:140:        "source_id": payload.get("source_id", ""),
+backend/app/qdrant_client.py:141:        "chunk_index": payload.get("chunk_index", -1),
+backend/app/qdrant_client.py:157:        "knowledge_source_id": payload.get("knowledge_source_id"),
+backend/app/qdrant_client.py:164:    source_id: str | None = None,
+backend/app/qdrant_client.py:170:    allowed_source_ids: list[str] | None = None,
+backend/app/qdrant_client.py:179:        source_id=source_id,
+backend/app/qdrant_client.py:185:        allowed_source_ids=allowed_source_ids,
+backend/app/qdrant_client.py:202:def get_chunks_by_source_id(source_id: str) -> list[dict[str, Any]]:
+backend/app/qdrant_client.py:224:                        key="source_id",
+backend/app/qdrant_client.py:225:                        match=MatchValue(value=source_id),
+backend/app/qdrant_client.py:243:    chunks.sort(key=lambda item: int(item.get("chunk_index", 0)))
+backend/app/qdrant_client.py:247:def _scroll_source_point_ids(client: QdrantClient, source_id: str) -> list[Any]:
+backend/app/qdrant_client.py:257:                        key="source_id",
+backend/app/qdrant_client.py:258:                        match=MatchValue(value=source_id),
+backend/app/qdrant_client.py:279:def get_chunk_by_source_id_and_index(source_id: str, chunk_index: int) -> dict[str, Any] | None:
+backend/app/qdrant_client.py:281:    Return one exact chunk from Qdrant by source_id + chunk_index.
+backend/app/qdrant_client.py:296:                    key="source_id",
+backend/app/qdrant_client.py:297:                    match=MatchValue(value=source_id),
+backend/app/qdrant_client.py:300:                    key="chunk_index",
+backend/app/qdrant_client.py:301:                    match=MatchValue(value=chunk_index),
+backend/app/qdrant_client.py:318:    Fetches exact chunks by source_id + chunk_index.
+backend/app/qdrant_client.py:326:        source_id = str(ref.get("source_id") or "").strip()
+backend/app/qdrant_client.py:328:            chunk_index = int(ref.get("chunk_index"))
+backend/app/qdrant_client.py:332:        key = (source_id, chunk_index)
+backend/app/qdrant_client.py:333:        if not source_id or chunk_index < 0 or key in seen:
+backend/app/qdrant_client.py:337:        chunk = get_chunk_by_source_id_and_index(source_id, chunk_index)
+backend/app/qdrant_client.py:344:def delete_points_by_source_id(source_id: str) -> None:
+backend/app/qdrant_client.py:349:            "Qdrant collection '%s' does not exist yet; skipping delete for source_id=%s",
+backend/app/qdrant_client.py:351:            source_id,
+backend/app/qdrant_client.py:355:    ids = _scroll_source_point_ids(client, source_id)
+backend/app/qdrant_client.py:360:    logger.info("Deleting %s Qdrant points for source_id=%s", len(ids), source_id)
+backend/app/source_resolver.py:80:                source_id,
+backend/app/source_resolver.py:182:    source_id: str | None = None,
+backend/app/source_resolver.py:190:    1. If UI already provided source_id, keep it.
+backend/app/source_resolver.py:197:    if source_id:
+backend/app/source_resolver.py:199:            "source_id": source_id,
+backend/app/source_resolver.py:209:            "source_id": None,
+backend/app/source_resolver.py:226:            "source_id": None,
+backend/app/source_resolver.py:251:            "source_id": None,
+backend/app/source_resolver.py:258:        "source_id": best.get("source_id"),
+backend/app/graph_store.py:34:                    source_id TEXT,
+backend/app/graph_store.py:35:                    chunk_index INTEGER,
+backend/app/graph_store.py:37:                    metadata_json TEXT,
+backend/app/graph_store.py:50:                    source_id TEXT,
+backend/app/graph_store.py:52:                    metadata_json TEXT,
+backend/app/graph_store.py:67:                CREATE INDEX IF NOT EXISTS idx_graph_nodes_source_id
+backend/app/graph_store.py:68:                ON graph_nodes(source_id)
+backend/app/graph_store.py:102:                CREATE INDEX IF NOT EXISTS idx_graph_edges_source_id
+backend/app/graph_store.py:103:                ON graph_edges(source_id)
+backend/app/graph_store.py:123:        source_id: str,
+backend/app/graph_store.py:128:        Replaces all graph rows for one source_id.
+backend/app/graph_store.py:154:                    node.get("source_id") or source_id,
+backend/app/graph_store.py:155:                    node.get("chunk_index"),
+backend/app/graph_store.py:187:                    edge.get("source_id") or source_id,
+backend/app/graph_store.py:194:            conn.execute("DELETE FROM graph_edges WHERE source_id = ?", (source_id,))
+backend/app/graph_store.py:195:            conn.execute("DELETE FROM graph_nodes WHERE source_id = ?", (source_id,))
+backend/app/graph_store.py:204:                        source_id,
+backend/app/graph_store.py:205:                        chunk_index,
+backend/app/graph_store.py:207:                        metadata_json
+backend/app/graph_store.py:222:                        source_id,
+backend/app/graph_store.py:224:                        metadata_json
+backend/app/graph_store.py:231:    def delete_graph_for_source(self, source_id: str) -> None:
+backend/app/graph_store.py:233:            conn.execute("DELETE FROM graph_edges WHERE source_id = ?", (source_id,))
+backend/app/graph_store.py:234:            conn.execute("DELETE FROM graph_nodes WHERE source_id = ?", (source_id,))
+backend/app/graph_store.py:241:                "SELECT COUNT(DISTINCT source_id) AS c FROM graph_nodes WHERE source_id IS NOT NULL"
+backend/app/graph_store.py:273:        source_id: str | None = None,
+backend/app/graph_store.py:285:        if source_id:
+backend/app/graph_store.py:286:            where.append("source_id = ?")
+backend/app/graph_store.py:287:            params.append(source_id)
+backend/app/graph_store.py:381:                chunk_index ASC,
+backend/app/graph_store.py:460:            source_id = str(seed.get("source_id") or "").strip()
+backend/app/graph_store.py:462:                chunk_index = int(seed.get("chunk_index"))
+backend/app/graph_store.py:466:            if source_id and chunk_index >= 0:
+backend/app/graph_store.py:467:                clean_seeds.append((source_id, chunk_index))
+backend/app/graph_store.py:474:            for source_id, chunk_index in clean_seeds:
+backend/app/graph_store.py:477:                    SELECT node_id, source_id, chunk_index, label
+backend/app/graph_store.py:479:                    WHERE source_id = ?
+backend/app/graph_store.py:481:                      AND chunk_index = ?
+backend/app/graph_store.py:484:                    (source_id, chunk_index),
+backend/app/graph_store.py:606:                SELECT node_id, source_id, chunk_index, label, source_path
+backend/app/graph_store.py:610:                  AND source_id IS NOT NULL
+backend/app/graph_store.py:611:                  AND chunk_index IS NOT NULL
+backend/app/graph_store.py:628:            source_id = str(row["source_id"] or "")
+backend/app/graph_store.py:630:                chunk_index = int(row["chunk_index"])
+backend/app/graph_store.py:634:            key = (source_id, chunk_index)
+backend/app/graph_store.py:645:                    "source_id": source_id,
+backend/app/graph_store.py:646:                    "chunk_index": chunk_index,
+backend/app/graph_store.py:670:            metadata = self._json_load(row["metadata_json"])
+backend/app/graph_store.py:676:                    "source_id": row["source_id"],

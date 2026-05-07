@@ -20,6 +20,7 @@ from app.chat_history import (
 from app.context_utils import build_citations, build_context_text, compact_chunks
 from app.followup_resolver import resolve_followup_question
 from app.llm_client import CHAT_MODEL, LLMCancelled, generate_text, stream_generate_text
+from app.metadata_db import MetadataDB
 from app.prompts import (
     CODE_FILE_EXPLANATION_PROMPT,
     DENIAL_RECOVERY_PROMPT,
@@ -397,6 +398,28 @@ def _exact_file_question_for_prompt(question: str, requested_file: str) -> str:
     )
 
 
+
+def _default_regular_chat_source_ids() -> list[str]:
+    """
+    Main Chat must not search Agent Studio sources by default.
+
+    Agent Studio has its own source assignment and allowed_source_ids path.
+    Regular InfraRAG chat should only search source_group='regular_chat'
+    unless the user/UI explicitly selected a source_id.
+    """
+    try:
+        records = MetadataDB().list_active_files(source_group="regular_chat")
+    except Exception:
+        return []
+
+    source_ids: list[str] = []
+    for record in records:
+        source_id = str(record.get("source_id") or "").strip()
+        if source_id and source_id not in source_ids:
+            source_ids.append(source_id)
+
+    return source_ids
+
 def stream_ask_events(
     question: str,
     conversation_id: str | None = None,
@@ -480,6 +503,12 @@ def stream_ask_events(
             and _is_file_explanation_question(effective_question)
         )
 
+        planned_retrieval_mode = (
+            "exact_file_source_id_lookup"
+            if exact_file_mode
+            else ("vector_graph_search" if use_graph_context else "adaptive_hybrid_search")
+        )
+
         if cancelled():
             yield _sse("cancelled", cancel_payload("after_planning"))
             return
@@ -501,7 +530,7 @@ def stream_ask_events(
                 "router": routing.get("router"),
                 "question_type": routing.get("question_type"),
                 "source_strategy": routing.get("source_strategy"),
-                "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else ("vector_graph_search" if use_graph_context else "vector_search"),
+                "retrieval_mode": planned_retrieval_mode,
                 "graph_context_enabled": bool(use_graph_context and not exact_file_mode),
                 "graph_chunks_added": 0,
                 "requested_file": requested_file,
@@ -556,6 +585,13 @@ def stream_ask_events(
 
         resolved_file: dict[str, str] | None = None
 
+        # Default Chat source isolation:
+        # If no specific source is selected, only search regular_chat sources.
+        # This prevents Agent Studio demo/customer/hr/github/legal data leaking into main chat answers.
+        default_allowed_source_ids = None
+        if not source_id:
+            default_allowed_source_ids = _default_regular_chat_source_ids()
+
         if exact_file_mode and requested_file:
             chunks, resolved_file = _retrieve_exact_file_chunks(
                 requested_file=requested_file,
@@ -579,11 +615,35 @@ def stream_ask_events(
                 retrieval_plan=retrieval_plan,
                 use_graph_context=bool(use_graph_context),
                 graph_max_chunks=3,
+                allowed_source_ids=default_allowed_source_ids,
             )
 
         if cancelled():
             yield _sse("cancelled", cancel_payload("after_retrieval"))
             return
+
+        actual_retrieval_mode = (
+            "exact_file_source_id_lookup"
+            if exact_file_mode
+            else (
+                str(chunks[0].get("retrieval_mode") or planned_retrieval_mode)
+                if chunks
+                else planned_retrieval_mode
+            )
+        )
+        actual_query_shape = (
+            str(chunks[0].get("query_shape") or "")
+            if chunks
+            else ""
+        )
+        actual_retrieval_reason = (
+            str(chunks[0].get("retrieval_planner_reason") or "")
+            if chunks
+            else ""
+        )
+        actual_adaptive_retrieval = bool(
+            chunks and chunks[0].get("adaptive_retrieval", False)
+        )
 
         if not chunks:
             RAG_NO_EVIDENCE_TOTAL.labels(pipeline=pipeline_used).inc()
@@ -596,7 +656,10 @@ def stream_ask_events(
                     "citations": citations,
                     "progress": 35,
                     "progress_label": "No evidence found.",
-                    "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else "vector_search",
+                    "retrieval_mode": actual_retrieval_mode,
+                    "query_shape": actual_query_shape,
+                    "retrieval_planner_reason": actual_retrieval_reason,
+                    "adaptive_retrieval": actual_adaptive_retrieval,
                     "requested_file": requested_file,
                     "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
                     "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
@@ -615,7 +678,10 @@ def stream_ask_events(
                     "citations": citations,
                     "progress": 100,
                     "progress_label": "Done.",
-                    "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else "vector_search",
+                    "retrieval_mode": actual_retrieval_mode,
+                    "query_shape": actual_query_shape,
+                    "retrieval_planner_reason": actual_retrieval_reason,
+                    "adaptive_retrieval": actual_adaptive_retrieval,
                     "requested_file": requested_file,
                     "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
                     "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
@@ -691,7 +757,10 @@ def stream_ask_events(
                 "citations": citations,
                 "progress": 35,
                 "progress_label": "Evidence found. Generating answer.",
-                "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else "vector_search",
+                "retrieval_mode": actual_retrieval_mode,
+                    "query_shape": actual_query_shape,
+                    "retrieval_planner_reason": actual_retrieval_reason,
+                    "adaptive_retrieval": actual_adaptive_retrieval,
                 "requested_file": requested_file,
                 "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
                 "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
@@ -1022,7 +1091,10 @@ def stream_ask_events(
                 "verified": verification_result.get("verified", False),
                 "progress": 100,
                 "progress_label": "Done.",
-                "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else "vector_search",
+                "retrieval_mode": actual_retrieval_mode,
+                    "query_shape": actual_query_shape,
+                    "retrieval_planner_reason": actual_retrieval_reason,
+                    "adaptive_retrieval": actual_adaptive_retrieval,
                 "requested_file": requested_file,
                 "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
                 "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,

@@ -1,0 +1,300 @@
+backend/app/state_store.py:20:def build_source_id(source_type: str, source_path: str) -> str:
+backend/app/context_utils.py:7:from app.qdrant_client import get_chunks_by_source_id
+backend/app/context_utils.py:58:            "[Source: {source} | Source ID: {source_id} | Chunk: {chunk_index}{page_info} | Score: {score:.4f}]\n{text}".format(
+backend/app/context_utils.py:60:                source_id=chunk.get("source_id", ""),
+backend/app/context_utils.py:61:                chunk_index=chunk.get("chunk_index", -1),
+backend/app/context_utils.py:78:            "source_id": chunk.get("source_id", ""),
+backend/app/context_utils.py:79:            "chunk_index": chunk.get("chunk_index", -1),
+backend/app/context_utils.py:97:def resolve_source_id(source_id: str | None = None) -> str | None:
+backend/app/context_utils.py:98:    if source_id:
+backend/app/context_utils.py:99:        return source_id
+backend/app/context_utils.py:104:        return latest.get("source_id")
+backend/app/context_utils.py:109:def load_all_source_chunks(source_id: str | None = None) -> tuple[str | None, list[dict[str, Any]]]:
+backend/app/context_utils.py:110:    resolved_source_id = resolve_source_id(source_id)
+backend/app/context_utils.py:111:    if not resolved_source_id:
+backend/app/context_utils.py:114:    chunks = get_chunks_by_source_id(resolved_source_id)
+backend/app/context_utils.py:115:    return resolved_source_id, chunks
+backend/app/audit.py:26:        pipeline_label=routing.get("pipeline_label"),
+backend/app/incremental_ingest.py:6:from app.state_store import build_source_id, sha256_file
+backend/app/incremental_ingest.py:10:    source_id = build_source_id(source_type, source_path)
+backend/app/incremental_ingest.py:12:    existing = metadata_db.get_file(source_id)
+backend/app/incremental_ingest.py:36:                    "source_id": build_source_id(source_type, str(p)),
+backend/app/qdrant_client.py:57:    source_id: str | None = None,
+backend/app/qdrant_client.py:63:    allowed_source_ids: list[str] | None = None,
+backend/app/qdrant_client.py:68:    clean_allowed_source_ids = [
+backend/app/qdrant_client.py:70:        for item in (allowed_source_ids or [])
+backend/app/qdrant_client.py:75:    if allowed_source_ids is not None and not clean_allowed_source_ids:
+backend/app/qdrant_client.py:78:                key="source_id",
+backend/app/qdrant_client.py:83:    # If a source_id is requested inside an allow-list, enforce intersection.
+backend/app/qdrant_client.py:84:    # If source_id is outside the allow-list, force no result.
+backend/app/qdrant_client.py:85:    if source_id and clean_allowed_source_ids and source_id not in clean_allowed_source_ids:
+backend/app/qdrant_client.py:88:                key="source_id",
+backend/app/qdrant_client.py:93:    if not source_id and len(clean_allowed_source_ids) == 1:
+backend/app/qdrant_client.py:96:                key="source_id",
+backend/app/qdrant_client.py:97:                match=MatchValue(value=clean_allowed_source_ids[0]),
+backend/app/qdrant_client.py:101:    if not source_id and len(clean_allowed_source_ids) > 1:
+backend/app/qdrant_client.py:103:            FieldCondition(key="source_id", match=MatchValue(value=item))
+backend/app/qdrant_client.py:104:            for item in clean_allowed_source_ids
+backend/app/qdrant_client.py:107:    if source_id:
+backend/app/qdrant_client.py:108:        conditions.append(FieldCondition(key="source_id", match=MatchValue(value=source_id)))
+backend/app/qdrant_client.py:140:        "source_id": payload.get("source_id", ""),
+backend/app/qdrant_client.py:141:        "chunk_index": payload.get("chunk_index", -1),
+backend/app/qdrant_client.py:157:        "knowledge_source_id": payload.get("knowledge_source_id"),
+backend/app/qdrant_client.py:164:    source_id: str | None = None,
+backend/app/qdrant_client.py:170:    allowed_source_ids: list[str] | None = None,
+backend/app/qdrant_client.py:179:        source_id=source_id,
+backend/app/qdrant_client.py:185:        allowed_source_ids=allowed_source_ids,
+backend/app/qdrant_client.py:202:def get_chunks_by_source_id(source_id: str) -> list[dict[str, Any]]:
+backend/app/qdrant_client.py:224:                        key="source_id",
+backend/app/qdrant_client.py:225:                        match=MatchValue(value=source_id),
+backend/app/qdrant_client.py:243:    chunks.sort(key=lambda item: int(item.get("chunk_index", 0)))
+backend/app/qdrant_client.py:247:def _scroll_source_point_ids(client: QdrantClient, source_id: str) -> list[Any]:
+backend/app/qdrant_client.py:257:                        key="source_id",
+backend/app/qdrant_client.py:258:                        match=MatchValue(value=source_id),
+backend/app/qdrant_client.py:279:def get_chunk_by_source_id_and_index(source_id: str, chunk_index: int) -> dict[str, Any] | None:
+backend/app/qdrant_client.py:281:    Return one exact chunk from Qdrant by source_id + chunk_index.
+backend/app/qdrant_client.py:296:                    key="source_id",
+backend/app/qdrant_client.py:297:                    match=MatchValue(value=source_id),
+backend/app/qdrant_client.py:300:                    key="chunk_index",
+backend/app/qdrant_client.py:301:                    match=MatchValue(value=chunk_index),
+backend/app/qdrant_client.py:318:    Fetches exact chunks by source_id + chunk_index.
+backend/app/qdrant_client.py:326:        source_id = str(ref.get("source_id") or "").strip()
+backend/app/qdrant_client.py:328:            chunk_index = int(ref.get("chunk_index"))
+backend/app/qdrant_client.py:332:        key = (source_id, chunk_index)
+backend/app/qdrant_client.py:333:        if not source_id or chunk_index < 0 or key in seen:
+backend/app/qdrant_client.py:337:        chunk = get_chunk_by_source_id_and_index(source_id, chunk_index)
+backend/app/qdrant_client.py:344:def delete_points_by_source_id(source_id: str) -> None:
+backend/app/qdrant_client.py:349:            "Qdrant collection '%s' does not exist yet; skipping delete for source_id=%s",
+backend/app/qdrant_client.py:351:            source_id,
+backend/app/qdrant_client.py:355:    ids = _scroll_source_point_ids(client, source_id)
+backend/app/qdrant_client.py:360:    logger.info("Deleting %s Qdrant points for source_id=%s", len(ids), source_id)
+backend/app/source_resolver.py:80:                source_id,
+backend/app/source_resolver.py:182:    source_id: str | None = None,
+backend/app/source_resolver.py:190:    1. If UI already provided source_id, keep it.
+backend/app/source_resolver.py:197:    if source_id:
+backend/app/source_resolver.py:199:            "source_id": source_id,
+backend/app/source_resolver.py:209:            "source_id": None,
+backend/app/source_resolver.py:226:            "source_id": None,
+backend/app/source_resolver.py:251:            "source_id": None,
+backend/app/source_resolver.py:258:        "source_id": best.get("source_id"),
+backend/app/graph_store.py:34:                    source_id TEXT,
+backend/app/graph_store.py:35:                    chunk_index INTEGER,
+backend/app/graph_store.py:37:                    metadata_json TEXT,
+backend/app/graph_store.py:50:                    source_id TEXT,
+backend/app/graph_store.py:52:                    metadata_json TEXT,
+backend/app/graph_store.py:67:                CREATE INDEX IF NOT EXISTS idx_graph_nodes_source_id
+backend/app/graph_store.py:68:                ON graph_nodes(source_id)
+backend/app/graph_store.py:102:                CREATE INDEX IF NOT EXISTS idx_graph_edges_source_id
+backend/app/graph_store.py:103:                ON graph_edges(source_id)
+backend/app/graph_store.py:123:        source_id: str,
+backend/app/graph_store.py:128:        Replaces all graph rows for one source_id.
+backend/app/graph_store.py:154:                    node.get("source_id") or source_id,
+backend/app/graph_store.py:155:                    node.get("chunk_index"),
+backend/app/graph_store.py:187:                    edge.get("source_id") or source_id,
+backend/app/graph_store.py:194:            conn.execute("DELETE FROM graph_edges WHERE source_id = ?", (source_id,))
+backend/app/graph_store.py:195:            conn.execute("DELETE FROM graph_nodes WHERE source_id = ?", (source_id,))
+backend/app/graph_store.py:204:                        source_id,
+backend/app/graph_store.py:205:                        chunk_index,
+backend/app/graph_store.py:207:                        metadata_json
+backend/app/graph_store.py:222:                        source_id,
+backend/app/graph_store.py:224:                        metadata_json
+backend/app/graph_store.py:231:    def delete_graph_for_source(self, source_id: str) -> None:
+backend/app/graph_store.py:233:            conn.execute("DELETE FROM graph_edges WHERE source_id = ?", (source_id,))
+backend/app/graph_store.py:234:            conn.execute("DELETE FROM graph_nodes WHERE source_id = ?", (source_id,))
+backend/app/graph_store.py:241:                "SELECT COUNT(DISTINCT source_id) AS c FROM graph_nodes WHERE source_id IS NOT NULL"
+backend/app/graph_store.py:273:        source_id: str | None = None,
+backend/app/graph_store.py:285:        if source_id:
+backend/app/graph_store.py:286:            where.append("source_id = ?")
+backend/app/graph_store.py:287:            params.append(source_id)
+backend/app/graph_store.py:381:                chunk_index ASC,
+backend/app/graph_store.py:460:            source_id = str(seed.get("source_id") or "").strip()
+backend/app/graph_store.py:462:                chunk_index = int(seed.get("chunk_index"))
+backend/app/graph_store.py:466:            if source_id and chunk_index >= 0:
+backend/app/graph_store.py:467:                clean_seeds.append((source_id, chunk_index))
+backend/app/graph_store.py:474:            for source_id, chunk_index in clean_seeds:
+backend/app/graph_store.py:477:                    SELECT node_id, source_id, chunk_index, label
+backend/app/graph_store.py:479:                    WHERE source_id = ?
+backend/app/graph_store.py:481:                      AND chunk_index = ?
+backend/app/graph_store.py:484:                    (source_id, chunk_index),
+backend/app/graph_store.py:606:                SELECT node_id, source_id, chunk_index, label, source_path
+backend/app/graph_store.py:610:                  AND source_id IS NOT NULL
+backend/app/graph_store.py:611:                  AND chunk_index IS NOT NULL
+backend/app/graph_store.py:628:            source_id = str(row["source_id"] or "")
+backend/app/graph_store.py:630:                chunk_index = int(row["chunk_index"])
+backend/app/graph_store.py:634:            key = (source_id, chunk_index)
+backend/app/graph_store.py:645:                    "source_id": source_id,
+backend/app/graph_store.py:646:                    "chunk_index": chunk_index,
+backend/app/graph_store.py:670:            metadata = self._json_load(row["metadata_json"])
+backend/app/graph_store.py:676:                    "source_id": row["source_id"],
+backend/app/graph_store.py:677:                    "chunk_index": row["chunk_index"],
+backend/app/graph_store.py:690:            metadata = self._json_load(row["metadata_json"])
+backend/app/graph_store.py:697:                    "source_id": row["source_id"],
+backend/app/answer_verifier.py:254:    if routing.get("source_strategy") == "allow_multiple_sources":
+backend/app/summary_jobs.py:19:from app.retrieve import retrieve_context
+backend/app/summary_jobs.py:46:                source_id TEXT,
+backend/app/summary_jobs.py:77:        "source_id",
+backend/app/summary_jobs.py:163:def _resolve_summary_source_id(
+backend/app/summary_jobs.py:165:    explicit_source_id: str | None,
+backend/app/summary_jobs.py:176:    - Group retrieved chunks by source_id.
+backend/app/summary_jobs.py:179:    if explicit_source_id:
+backend/app/summary_jobs.py:180:        return explicit_source_id
+backend/app/summary_jobs.py:185:        candidate_chunks = retrieve_context(
+backend/app/summary_jobs.py:201:        sid = chunk.get("source_id")
+backend/app/summary_jobs.py:209:    best_source_id = None
+backend/app/summary_jobs.py:227:            best_source_id = sid
+backend/app/summary_jobs.py:229:    return best_source_id
+backend/app/summary_jobs.py:237:    source_id: str | None,
+backend/app/summary_jobs.py:246:        resolved_input_source_id = _resolve_summary_source_id(
+backend/app/summary_jobs.py:248:            explicit_source_id=source_id,
+backend/app/summary_jobs.py:254:        resolved_source_id, chunks = load_all_source_chunks(resolved_input_source_id)
+backend/app/summary_jobs.py:256:        if not resolved_source_id or not chunks:
+backend/app/summary_jobs.py:261:                source_id=resolved_source_id or "",
+backend/app/summary_jobs.py:275:                source_id=resolved_source_id,
+backend/app/summary_jobs.py:288:            source_id=resolved_source_id,
+backend/app/summary_jobs.py:390:    source_id: str | None = None,
+backend/app/summary_jobs.py:405:                source_id,
+backend/app/summary_jobs.py:412:            (job_id, conversation_id, question, source_id),
+backend/app/summary_jobs.py:422:            "source_id": source_id,
+backend/app/pipelines/repo_explanation.py:12:from app.qdrant_client import get_chunks_by_source_id
+backend/app/pipelines/repo_explanation.py:14:from app.retrieve import retrieve_context
+backend/app/pipelines/repo_explanation.py:61:    Resolve a requested file/path to the indexed source_id using SQLite.
+backend/app/pipelines/repo_explanation.py:86:            SELECT source_id, source_path, status, file_type, source_type, chunk_count, last_ingested_at
+backend/app/pipelines/repo_explanation.py:88:            WHERE source_id IS NOT NULL
+backend/app/pipelines/repo_explanation.py:132:        "source_id": str(best["source_id"]),
+backend/app/pipelines/repo_explanation.py:137:def _chunk_index(chunk: dict[str, Any]) -> int:
+backend/app/pipelines/repo_explanation.py:139:        chunk.get("chunk_index"),
+backend/app/pipelines/repo_explanation.py:148:                metadata.get("chunk_index"),
+backend/app/pipelines/repo_explanation.py:158:                payload.get("chunk_index"),
+backend/app/pipelines/repo_explanation.py:168:                    payload_metadata.get("chunk_index"),
+backend/app/pipelines/repo_explanation.py:210:        "candidate_top_k": 80,
+backend/app/pipelines/repo_explanation.py:211:        "final_top_k": 50,
+backend/app/pipelines/repo_explanation.py:212:        "source_strategy": "cluster_by_best_source",
+backend/app/pipelines/repo_explanation.py:213:        "router": "exact_file_source_id_lookup",
+backend/app/pipelines/repo_explanation.py:221:    source_id: str | None = None,
+backend/app/pipelines/repo_explanation.py:229:    if source_id:
+backend/app/pipelines/repo_explanation.py:231:            "source_id": source_id,
+backend/app/pipelines/repo_explanation.py:237:    if not resolved or not resolved.get("source_id"):
+backend/app/pipelines/repo_explanation.py:240:    # Exact file mode must not use retrieve_context().
+backend/app/pipelines/repo_explanation.py:241:    # retrieve_context() performs embedding, vector search, clustering, and reranking.
+backend/app/pipelines/repo_explanation.py:242:    # We already resolved the exact source_id from SQLite, so load all file chunks
+backend/app/pipelines/repo_explanation.py:243:    # directly from Qdrant by source_id. This is faster and avoids unrelated context.
+backend/app/pipelines/repo_explanation.py:244:    chunks = get_chunks_by_source_id(resolved["source_id"])
+backend/app/pipelines/repo_explanation.py:246:    # Optional defensive filters. source_id should already be exact, but keep these
+backend/app/pipelines/repo_explanation.py:266:    chunks.sort(key=_chunk_index)
+backend/app/pipelines/repo_explanation.py:310:    source_id: str | None = None,
+backend/app/pipelines/repo_explanation.py:322:            source_id=source_id,
+backend/app/pipelines/repo_explanation.py:333:                    "retrieval_mode": "exact_file_source_id_lookup",
+backend/app/pipelines/repo_explanation.py:335:                    "resolved_source_id": resolved.get("source_id") if resolved else None,
+backend/app/pipelines/repo_explanation.py:360:                "retrieval_mode": "exact_file_source_id_lookup",
+backend/app/pipelines/repo_explanation.py:362:                "resolved_source_id": resolved.get("source_id") if resolved else None,
+backend/app/pipelines/repo_explanation.py:368:    chunks = retrieve_context(
+backend/app/pipelines/repo_explanation.py:371:        source_id=source_id,
+backend/app/pipelines/normal_qa.py:11:from app.retrieve import retrieve_context
+backend/app/pipelines/normal_qa.py:22:    source_id: str | None = None,
+backend/app/pipelines/normal_qa.py:31:        source_id=source_id,
+backend/app/pipelines/normal_qa.py:36:    resolved_source_id = source_id or source_resolution.get("source_id")
+backend/app/pipelines/normal_qa.py:38:    chunks = retrieve_context(
+backend/app/pipelines/normal_qa.py:41:        source_id=resolved_source_id,
+backend/app/pipelines/normal_qa.py:80:        routing={"source_strategy": "cluster_by_best_source"},
+backend/app/pipelines/incident_runbook.py:10:from app.retrieve import retrieve_context
+backend/app/pipelines/incident_runbook.py:20:    source_id: str | None = None,
+backend/app/pipelines/incident_runbook.py:27:    chunks = retrieve_context(
+backend/app/pipelines/incident_runbook.py:30:        source_id=source_id,
+backend/app/pipelines/document_summary.py:56:    source_id: str | None = None,
+backend/app/pipelines/document_summary.py:63:    resolved_source_id, chunks = load_all_source_chunks(source_id)
+backend/app/pipelines/document_summary.py:65:    if not resolved_source_id or not chunks:
+backend/app/pipelines/document_summary.py:115:    source_record = db.get_file(resolved_source_id)
+backend/app/pipelines/document_summary.py:133:        "summary_source_id": resolved_source_id,
+backend/app/pipelines/long_explanation.py:10:from app.retrieve import retrieve_context
+backend/app/pipelines/long_explanation.py:20:    source_id: str | None = None,
+backend/app/pipelines/long_explanation.py:27:    chunks = retrieve_context(
+backend/app/pipelines/long_explanation.py:30:        source_id=source_id,
+backend/app/reranker.py:50:def rerank_hits(
+backend/app/delete_sync.py:6:from app.qdrant_client import delete_points_by_source_id
+backend/app/delete_sync.py:13:    deleted_source_ids: list[str] = []
+backend/app/delete_sync.py:18:            source_id = record["source_id"]
+backend/app/delete_sync.py:19:            delete_points_by_source_id(source_id)
+backend/app/delete_sync.py:20:            metadata_db.mark_deleted(source_id)
+backend/app/delete_sync.py:21:            deleted_source_ids.append(source_id)
+backend/app/delete_sync.py:23:    return deleted_source_ids
+backend/app/streaming_orchestrator.py:32:from app.qdrant_client import get_chunks_by_source_id
+backend/app/streaming_orchestrator.py:45:from app.retrieve import retrieve_context
+backend/app/streaming_orchestrator.py:127:            SELECT source_id, source_path, status, file_type, source_type, chunk_count, last_ingested_at
+backend/app/streaming_orchestrator.py:129:            WHERE source_id IS NOT NULL
+backend/app/streaming_orchestrator.py:173:        "source_id": str(best["source_id"]),
+backend/app/streaming_orchestrator.py:257:def _chunk_index(chunk: dict[str, Any]) -> int:
+backend/app/streaming_orchestrator.py:259:        chunk.get("chunk_index"),
+backend/app/streaming_orchestrator.py:268:                metadata.get("chunk_index"),
+backend/app/streaming_orchestrator.py:278:                payload.get("chunk_index"),
+backend/app/streaming_orchestrator.py:288:                    payload_metadata.get("chunk_index"),
+backend/app/streaming_orchestrator.py:330:        "candidate_top_k": 80,
+backend/app/streaming_orchestrator.py:331:        "final_top_k": 50,
+backend/app/streaming_orchestrator.py:332:        "source_strategy": "cluster_by_best_source",
+backend/app/streaming_orchestrator.py:333:        "router": "exact_file_source_id_lookup",
+backend/app/streaming_orchestrator.py:341:    source_id: str | None = None,
+backend/app/streaming_orchestrator.py:349:    if source_id:
+backend/app/streaming_orchestrator.py:351:            "source_id": source_id,
+backend/app/streaming_orchestrator.py:357:    if not resolved or not resolved.get("source_id"):
+backend/app/streaming_orchestrator.py:360:    # Exact file mode must not use retrieve_context().
+backend/app/streaming_orchestrator.py:361:    # retrieve_context() performs embedding, vector search, clustering, and reranking.
+backend/app/streaming_orchestrator.py:362:    # We already resolved the exact source_id from SQLite, so load all file chunks
+backend/app/streaming_orchestrator.py:363:    # directly from Qdrant by source_id. This is faster and avoids unrelated context.
+backend/app/streaming_orchestrator.py:364:    chunks = get_chunks_by_source_id(resolved["source_id"])
+backend/app/streaming_orchestrator.py:366:    # Optional defensive filters. source_id should already be exact, but keep these
+backend/app/streaming_orchestrator.py:386:    chunks.sort(key=_chunk_index)
+backend/app/streaming_orchestrator.py:403:    source_id: str | None = None,
+backend/app/streaming_orchestrator.py:435:                "progress_label": "Request registered.",
+backend/app/streaming_orchestrator.py:453:            source_id=source_id,
+backend/app/streaming_orchestrator.py:458:        if not source_id and source_resolution.get("source_id"):
+backend/app/streaming_orchestrator.py:459:            source_id = str(source_resolution.get("source_id"))
+backend/app/streaming_orchestrator.py:497:                "pipeline_label": routing.get("pipeline_label"),
+backend/app/streaming_orchestrator.py:503:                "source_strategy": routing.get("source_strategy"),
+backend/app/streaming_orchestrator.py:504:                "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else ("vector_graph_search" if use_graph_context else "vector_search"),
+backend/app/streaming_orchestrator.py:510:                "auto_source_id": source_resolution.get("source_id"),
+backend/app/streaming_orchestrator.py:514:                "progress_label": "Planning complete. Searching evidence.",
+backend/app/streaming_orchestrator.py:527:                source_id=source_id,
+backend/app/streaming_orchestrator.py:540:                    "progress_label": "Document summary job started.",
+backend/app/streaming_orchestrator.py:549:        # It already uses exact chunks by source_id, so avoid oversized generation.
+backend/app/streaming_orchestrator.py:562:                source_id=source_id,
+backend/app/streaming_orchestrator.py:570:            chunks = retrieve_context(
+backend/app/streaming_orchestrator.py:573:                source_id=source_id,
+backend/app/streaming_orchestrator.py:598:                    "progress_label": "No evidence found.",
+backend/app/streaming_orchestrator.py:599:                    "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else "vector_search",
+backend/app/streaming_orchestrator.py:601:                    "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
+backend/app/streaming_orchestrator.py:606:            yield _sse("token", {"token": answer, "progress": 100, "progress_label": "Done."})
+backend/app/streaming_orchestrator.py:617:                    "progress_label": "Done.",
+backend/app/streaming_orchestrator.py:618:                    "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else "vector_search",
+backend/app/streaming_orchestrator.py:620:                    "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
+backend/app/streaming_orchestrator.py:648:                        "progress_label": "Evidence below confidence threshold.",
+backend/app/streaming_orchestrator.py:651:                yield _sse("token", {"token": answer, "progress": 100, "progress_label": "Done."})
+backend/app/streaming_orchestrator.py:662:                        "progress_label": "Done.",
+backend/app/streaming_orchestrator.py:693:                "progress_label": "Evidence found. Generating answer.",
+backend/app/streaming_orchestrator.py:694:                "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else "vector_search",
+backend/app/streaming_orchestrator.py:696:                "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
+backend/app/streaming_orchestrator.py:721:                yield _sse("token", {"token": token, "progress": progress, "progress_label": "Generating answer."})
+backend/app/streaming_orchestrator.py:743:                    "progress_label": "Expanding answer.",
+backend/app/streaming_orchestrator.py:760:                    "progress_label": "Streaming expanded answer.",
+backend/app/streaming_orchestrator.py:787:                            "progress_label": "Streaming expanded answer.",
+backend/app/streaming_orchestrator.py:817:                        "progress_label": "Expansion complete.",
+backend/app/streaming_orchestrator.py:835:        # Exact file/code explanation already retrieves one specific file by source_id.
+backend/app/streaming_orchestrator.py:851:                    "progress_label": "Verifying answer.",
+backend/app/streaming_orchestrator.py:899:                    "progress_label": "Verification complete.",
+backend/app/streaming_orchestrator.py:913:                    "progress_label": "Recovering answer.",
+backend/app/streaming_orchestrator.py:950:                        "progress_label": "Recovery complete.",
+backend/app/streaming_orchestrator.py:1024:                "progress_label": "Done.",
+backend/app/streaming_orchestrator.py:1025:                "retrieval_mode": "exact_file_source_id_lookup" if exact_file_mode else "vector_search",
+backend/app/streaming_orchestrator.py:1027:                "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
+backend/app/metadata_db.py:69:                    source_id TEXT PRIMARY KEY,
+backend/app/metadata_db.py:92:            self._ensure_column(conn, "files", "metadata_json", "metadata_json TEXT DEFAULT '{}'")
+backend/app/metadata_db.py:94:            self._ensure_column(conn, "files", "knowledge_source_id", "knowledge_source_id TEXT")
+backend/app/metadata_db.py:99:                    knowledge_source_id TEXT PRIMARY KEY,
+backend/app/metadata_db.py:109:                    metadata_json TEXT DEFAULT '{}',
+backend/app/metadata_db.py:128:                    metadata_json TEXT DEFAULT '{}',
+backend/app/metadata_db.py:138:                    agent_source_id TEXT PRIMARY KEY,
+backend/app/metadata_db.py:141:                    knowledge_source_id TEXT NOT NULL,
+backend/app/metadata_db.py:146:                    UNIQUE(agent_id, knowledge_source_id),
+backend/app/metadata_db.py:148:                    FOREIGN KEY(knowledge_source_id) REFERENCES knowledge_sources(knowledge_source_id) ON DELETE CASCADE
+backend/app/metadata_db.py:195:                    source_id TEXT NOT NULL,
+backend/app/metadata_db.py:196:                    chunk_index INTEGER NOT NULL,
+backend/app/metadata_db.py:200:                    FOREIGN KEY(source_id) REFERENCES files(source_id) ON DELETE CASCADE
+backend/app/metadata_db.py:241:                    pipeline_label TEXT,
