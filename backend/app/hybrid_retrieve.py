@@ -501,10 +501,23 @@ def adaptive_hybrid_retrieve(
 
     final_hits = diversified[:safe_limit]
 
+    if use_keyword and use_vector:
+        retriever_used = "FTS5 + Qdrant"
+    elif use_keyword:
+        retriever_used = "FTS5"
+    elif use_vector:
+        retriever_used = "Qdrant"
+    else:
+        retriever_used = "none"
+
     for hit in final_hits:
         hit.setdefault("adaptive_retrieval", True)
         hit.setdefault("retrieval_mode", retrieval_plan.get("retrieval_mode", "vector_rerank"))
+        hit.setdefault("retrieval_speed", retrieval_plan.get("retrieval_speed", "normal"))
+        hit.setdefault("retriever_used", retriever_used)
         hit.setdefault("query_shape", retrieval_plan.get("query_shape", "normal_qa"))
+        hit.setdefault("reranker_used", bool(use_reranker))
+        hit.setdefault("neighbour_window", int(retrieval_plan.get("neighbour_window", 0) or 0))
         hit.setdefault("retrieval_planner_reason", retrieval_plan.get("planner_reason", ""))
 
     return final_hits

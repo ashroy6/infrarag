@@ -229,6 +229,8 @@ class MetadataDB:
                 """
             )
 
+            self._ensure_column(conn, "chat_messages", "metadata_json", "metadata_json TEXT DEFAULT '{}'")
+
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -1065,6 +1067,7 @@ class MetadataDB:
         sources_json: str | None = None,
         intent: str | None = None,
         pipeline_used: str | None = None,
+        metadata_json: str | None = None,
     ) -> str:
         if role not in {"user", "assistant", "system"}:
             raise ValueError(f"Invalid chat message role: {role}")
@@ -1076,9 +1079,9 @@ class MetadataDB:
                 """
                 INSERT INTO chat_messages (
                     message_id, conversation_id, role, content,
-                    sources_json, intent, pipeline_used
+                    sources_json, intent, pipeline_used, metadata_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id,
@@ -1088,6 +1091,7 @@ class MetadataDB:
                     sources_json,
                     intent,
                     pipeline_used,
+                    metadata_json or "{}",
                 ),
             )
             conn.execute(
@@ -1121,6 +1125,7 @@ class MetadataDB:
                     sources_json,
                     intent,
                     pipeline_used,
+                    metadata_json,
                     created_at
                 FROM chat_messages
                 WHERE conversation_id = ?

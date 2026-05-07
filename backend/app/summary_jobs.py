@@ -354,6 +354,33 @@ def _run_document_summary_job(
             citations_json=json.dumps(citations, ensure_ascii=False),
         )
 
+        latency_ms = int((time.perf_counter() - started) * 1000)
+
+        summary_metadata = {
+            "pipeline_used": routing.get("pipeline_used") or "document_summary",
+            "pipeline_label": routing.get("pipeline_label") or "Full document/book summarisation",
+            "intent": routing.get("intent") or "document_summary",
+            "intent_confidence": routing.get("confidence"),
+            "intent_reason": "Background document summary completed.",
+            "router": "background",
+            "retrieval_speed": "background_summary",
+            "mode_label": "Background Summary",
+            "retrieval_mode": "full_source_chunks",
+            "retriever_used": "Qdrant source scroll",
+            "query_shape": "document_summary",
+            "reranker_used": False,
+            "neighbour_window": 0,
+            "retrieved_chunks": len(citations),
+            "verification_verdict": "n/a",
+            "verification_reason": "Verifier not used for background document summary.",
+            "graph_context_enabled": False,
+            "graph_chunks_added": 0,
+            "latency_ms": latency_ms,
+            "progress": 100,
+            "progress_label": "Done.",
+            "source_id": resolved_source_id,
+        }
+
         if conversation_id:
             add_assistant_message(
                 conversation_id=conversation_id,
@@ -361,15 +388,14 @@ def _run_document_summary_job(
                 citations=citations,
                 intent=routing.get("intent"),
                 pipeline_used=routing.get("pipeline_used"),
+                metadata=summary_metadata,
             )
-
-        latency_ms = int((time.perf_counter() - started) * 1000)
 
         save_audit_event(
             conversation_id=conversation_id,
             question=question,
             answer=answer,
-            routing=routing,
+            routing={**routing, **summary_metadata},
             citations=citations,
             model=CHAT_MODEL,
             latency_ms=latency_ms,

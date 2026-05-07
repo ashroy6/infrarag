@@ -39,6 +39,7 @@ def add_assistant_message(
     citations: list[dict[str, Any]] | None = None,
     intent: str | None = None,
     pipeline_used: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     db = MetadataDB()
     return db.add_chat_message(
@@ -48,6 +49,7 @@ def add_assistant_message(
         sources_json=json.dumps(citations or [], ensure_ascii=False),
         intent=intent,
         pipeline_used=pipeline_used,
+        metadata_json=json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True),
     )
 
 

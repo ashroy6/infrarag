@@ -45,6 +45,7 @@ def retrieve_context(
     use_graph_context: bool = False,
     graph_max_chunks: int = 3,
     allowed_source_ids: list[str] | None = None,
+    retrieval_speed: str = "normal",
 ) -> list[dict[str, Any]]:
     """
     Main retrieval entry point.
@@ -67,9 +68,12 @@ def retrieve_context(
 
     base_plan = retrieval_plan or plan_query(query)
 
+    clean_retrieval_speed = "direct" if retrieval_speed == "direct" else ("fast" if retrieval_speed == "fast" else "normal")
+
     adaptive_plan = build_adaptive_retrieval_plan(
         query=query,
         base_plan=base_plan,
+        retrieval_speed=clean_retrieval_speed,
     )
 
     source_profile = get_source_profile(source_id)

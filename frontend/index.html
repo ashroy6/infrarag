@@ -294,6 +294,35 @@
       white-space: nowrap;
     }
 
+    .mode-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: #242424;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px;
+    }
+
+    .mode-option {
+      cursor: pointer;
+      font-size: 13px;
+      color: #cfcfcf;
+      padding: 6px 10px;
+      border-radius: 999px;
+      user-select: none;
+    }
+
+    .mode-option input {
+      display: none;
+    }
+
+    .mode-option:has(input:checked) {
+      background: var(--accent);
+      color: #ffffff;
+      font-weight: 700;
+    }
+
     .source-summary {
       color: var(--muted);
       font-size: 12px;
@@ -434,6 +463,42 @@
     .meta-grid strong {
       color: #bdbdbd;
       font-weight: 600;
+    }
+
+    .timing-details {
+      margin-top: 8px;
+      color: #a3a3a3;
+      font-size: 12px;
+    }
+
+    .timing-details summary {
+      cursor: pointer;
+      color: #d1d5db;
+      font-weight: 700;
+      margin-bottom: 6px;
+      user-select: none;
+    }
+
+    .timing-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px 12px;
+      padding-top: 4px;
+    }
+
+    .timing-grid div {
+      color: #9ca3af;
+    }
+
+    .timing-grid strong {
+      color: #bdbdbd;
+      font-weight: 600;
+    }
+
+    @media (max-width: 900px) {
+      .timing-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
     }
 
     .mini-progress {
@@ -865,12 +930,27 @@
 
           <div id="sourceSummary" class="source-summary">Loading sources...</div>
 
-          <div class="row" style="margin-top:8px;">
+          <div class="row" style="margin-top:8px; align-items:center;">
+            <div class="mode-toggle" title="Direct returns evidence snippets. Quick AI uses short RAG. Deep AI uses deeper retrieval.">
+              <label class="mode-option">
+                <input type="radio" name="retrievalSpeed" value="normal" checked />
+                Deep AI
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="retrievalSpeed" value="fast" />
+                Quick AI
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="retrievalSpeed" value="direct" />
+                Direct
+              </label>
+            </div>
+
             <label class="inline-check" title="Adds 2-3 graph-neighbour chunks from the Knowledge Graph. Slower but may improve multi-hop answers.">
               <input id="graphContextToggle" type="checkbox" />
               Use Graph Context
             </label>
-            <span class="source-summary">Adds related graph chunks from Page 3 Knowledge Graph. Default OFF for speed.</span>
+            <span class="source-summary">Direct is snippet-only. Quick AI is short RAG. Deep AI is deeper RAG. Graph default OFF for speed.</span>
           </div>
         </div>
 
@@ -950,6 +1030,7 @@
           saved_at: Date.now(),
           currentConversationId,
           messages: Array.isArray(messages) ? messages.slice(-50) : [],
+          retrieval_speed: getRetrievalSpeed(),
         };
 
         localStorage.setItem(CHAT_UI_STATE_KEY, JSON.stringify(state));
@@ -1006,6 +1087,8 @@
         graphToggle.checked = Boolean(state.graph_context_enabled);
       }
 
+      setRetrievalSpeed(state.retrieval_speed || "normal");
+
       renderMessages();
       return messages.length > 0;
     }
@@ -1030,6 +1113,8 @@
       if (graphToggle) {
         graphToggle.checked = false;
       }
+
+      setRetrievalSpeed("normal");
 
       renderSourceOptions();
     }
@@ -1063,6 +1148,57 @@
       localStorage.removeItem(QUESTION_DRAFT_KEY);
     }
 
+    function getRetrievalSpeed() {
+      const selected = document.querySelector('input[name="retrievalSpeed"]:checked');
+      const value = selected ? String(selected.value || "normal") : "normal";
+      if (value === "direct") return "direct";
+      if (value === "fast") return "fast";
+      return "normal";
+    }
+
+    function setRetrievalSpeed(value) {
+      const clean = value === "direct" ? "direct" : (value === "fast" ? "fast" : "normal");
+      const input = document.querySelector(`input[name="retrievalSpeed"][value="${clean}"]`);
+      if (input) {
+        input.checked = true;
+      }
+    }
+
+    function formatRetrievalSpeedLabel(value) {
+      const clean = String(value || "normal").toLowerCase();
+      if (clean === "direct") return "Direct";
+      if (clean === "fast") return "Quick AI";
+      if (clean === "background_summary") return "Background Summary";
+      return "Deep AI";
+    }
+
+    function metadataHasRuntimeDetails(meta) {
+      if (!meta || typeof meta !== "object") return false;
+
+      return Boolean(
+        meta.retriever_used ||
+        meta.retrieval_mode ||
+        meta.query_shape ||
+        meta.retrieved_chunks ||
+        meta.router ||
+        meta.intent_reason ||
+        meta.latency_ms ||
+        meta.latency_display
+      );
+    }
+
+    function safeMetadataFromMessage(item) {
+      const raw = item && item.metadata_json ? String(item.metadata_json) : "";
+      if (!raw) return {};
+
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+
     function bindStatePersistenceEvents() {
       const input = document.getElementById("question");
       if (input) {
@@ -1078,6 +1214,10 @@
       if (sourceSelect) {
         sourceSelect.addEventListener("change", persistChatState);
       }
+
+      document.querySelectorAll('input[name="retrievalSpeed"]').forEach(input => {
+        input.addEventListener("change", persistChatState);
+      });
 
       window.addEventListener("beforeunload", () => {
         saveQuestionDraft();
@@ -1293,19 +1433,30 @@
         const pipelineLabel = meta.pipeline_label || meta.pipeline_used || "";
 
         const progress = clampProgress(meta.progress ?? 0);
+        const hasRuntimeMeta = metadataHasRuntimeDetails(meta);
         const metaHtml = pipelineLabel ? `
           <div class="meta-box">
             <div class="meta-head">
               <div>
                 <div class="meta-grid">
                   <div><strong>Pipeline:</strong> ${escapeHtml(pipelineLabel)}</div>
-                  <div><strong>Planner confidence:</strong> ${escapeHtml(meta.intent_confidence ?? "n/a")}</div>
-                  <div><strong>Router:</strong> ${escapeHtml(meta.router ?? "n/a")}</div>
-                  <div><strong>Verifier:</strong> ${escapeHtml(meta.verification_verdict ?? "n/a")}</div>
-                  <div><strong>Graph:</strong> ${meta.graph_context_enabled ? `ON (${escapeHtml(meta.graph_chunks_added ?? 0)})` : "OFF"}</div>
-                  <div><strong>Latency:</strong> ${escapeHtml(meta.latency_display || (meta.latency_ms ? `${Math.round(Number(meta.latency_ms) / 1000)}s` : "n/a"))}</div>
+                  ${hasRuntimeMeta ? `
+                    <div><strong>Mode:</strong> ${escapeHtml(meta.mode_label || formatRetrievalSpeedLabel(meta.retrieval_speed || "normal"))}</div>
+                    <div><strong>Retriever:</strong> ${escapeHtml(meta.retriever_used || meta.retrieval_mode || "n/a")}</div>
+                    <div><strong>Query shape:</strong> ${escapeHtml(meta.query_shape || "n/a")}</div>
+                    <div><strong>Reranker:</strong> ${meta.reranker_used === true ? "ON" : (meta.reranker_used === false ? "OFF" : "n/a")}</div>
+                    <div><strong>Chunks:</strong> ${escapeHtml(meta.retrieved_chunks ?? "n/a")}</div>
+                    <div><strong>Planner confidence:</strong> ${escapeHtml(meta.intent_confidence ?? "n/a")}</div>
+                    <div><strong>Router:</strong> ${escapeHtml(meta.router ?? "n/a")}</div>
+                    <div><strong>Verifier:</strong> ${escapeHtml(meta.verification_verdict ?? "n/a")}</div>
+                    <div><strong>Graph:</strong> ${meta.graph_context_enabled ? `ON (${escapeHtml(meta.graph_chunks_added ?? 0)})` : "OFF"}</div>
+                    <div><strong>Latency:</strong> ${escapeHtml(meta.latency_display || (meta.latency_ms ? `${Math.round(Number(meta.latency_ms) / 1000)}s` : "n/a"))}</div>
+                  ` : `
+                    <div><strong>Metadata:</strong> Saved chat metadata not available</div>
+                  `}
                 </div>
-                <div style="margin-top:6px;"><strong>Reason:</strong> ${escapeHtml(meta.intent_reason || "n/a")}</div>
+                ${hasRuntimeMeta ? `<div style="margin-top:6px;"><strong>Reason:</strong> ${escapeHtml(meta.intent_reason || "n/a")}</div>` : ""}
+                ${renderTimingDetails(meta)}
               </div>
               <div class="mini-progress">
                 <div class="mini-progress-row">
@@ -1440,17 +1591,23 @@
             citations = [];
           }
 
+          const savedMeta = safeMetadataFromMessage(item);
+
           return {
             role: item.role,
             content: item.content,
             citations,
             meta: {
-              pipeline_label: item.pipeline_used || "",
-              pipeline_used: item.pipeline_used || "",
-              intent_confidence: "",
-              router: "",
-              latency_ms: "",
-              intent_reason: "",
+              pipeline_label: savedMeta.pipeline_label || item.pipeline_used || "",
+              pipeline_used: savedMeta.pipeline_used || item.pipeline_used || "",
+              intent_confidence: savedMeta.intent_confidence ?? "",
+              router: savedMeta.router || "",
+              latency_ms: savedMeta.latency_ms ?? "",
+              latency_display: savedMeta.latency_ms ? formatLatencySeconds(savedMeta.latency_ms) : "",
+              intent_reason: savedMeta.intent_reason || "",
+              ...savedMeta,
+              progress: savedMeta.progress ?? 100,
+              progress_label: savedMeta.progress_label || "Loaded from chat history.",
             }
           };
         });
@@ -1577,11 +1734,20 @@
             meta: {
               pipeline_label: "Full document/book summarisation",
               pipeline_used: "document_summary",
+              retrieval_speed: "background_summary",
+              mode_label: "Background Summary",
+              retrieval_mode: "full_source_chunks",
+              retriever_used: "Qdrant source scroll",
+              query_shape: "document_summary",
+              reranker_used: false,
+              retrieved_chunks: Array.isArray(job.citations) ? job.citations.length : "",
               intent_confidence: "",
               intent_reason: "Background document summary completed.",
               router: "background",
               latency_ms: "",
               verification_verdict: "n/a",
+              graph_context_enabled: false,
+              graph_chunks_added: 0,
               progress: 100,
               progress_label: "Done.",
             }
@@ -1601,6 +1767,52 @@
     function formatLatencySeconds(ms) {
       const seconds = Math.max(0, Math.round(Number(ms || 0) / 1000));
       return `${seconds}s`;
+    }
+
+    function formatTimingMs(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number < 0) return "n/a";
+
+      if (number >= 1000) {
+        return `${(number / 1000).toFixed(number >= 10000 ? 0 : 1)}s`;
+      }
+
+      return `${Math.round(number)}ms`;
+    }
+
+    function hasTimingDetails(meta) {
+      if (!meta || typeof meta !== "object") return false;
+
+      return [
+        "planning_ms",
+        "retrieval_ms",
+        "graph_ms",
+        "context_build_ms",
+        "time_to_first_token_ms",
+        "ollama_ms",
+        "audit_save_ms",
+        "total_latency_ms",
+      ].some(key => meta[key] !== undefined && meta[key] !== null && meta[key] !== "");
+    }
+
+    function renderTimingDetails(meta) {
+      if (!hasTimingDetails(meta)) return "";
+
+      return `
+        <details class="timing-details">
+          <summary>Timing details</summary>
+          <div class="timing-grid">
+            <div><strong>Planning:</strong> ${escapeHtml(formatTimingMs(meta.planning_ms))}</div>
+            <div><strong>Retrieval:</strong> ${escapeHtml(formatTimingMs(meta.retrieval_ms))}</div>
+            <div><strong>Graph:</strong> ${escapeHtml(formatTimingMs(meta.graph_ms))}</div>
+            <div><strong>Context:</strong> ${escapeHtml(formatTimingMs(meta.context_build_ms))}</div>
+            <div><strong>First token:</strong> ${escapeHtml(formatTimingMs(meta.time_to_first_token_ms))}</div>
+            <div><strong>Ollama:</strong> ${escapeHtml(formatTimingMs(meta.ollama_ms))}</div>
+            <div><strong>Audit save:</strong> ${escapeHtml(formatTimingMs(meta.audit_save_ms))}</div>
+            <div><strong>Total:</strong> ${escapeHtml(formatTimingMs(meta.total_latency_ms || meta.latency_ms))}</div>
+          </div>
+        </details>
+      `;
     }
 
     function stopLatencyTimer(finalLatencyMs = null) {
@@ -1731,6 +1943,7 @@
 
       const sourceId = document.getElementById("sourceSelect").value.trim();
       const useGraphContext = Boolean(document.getElementById("graphContextToggle")?.checked);
+      const retrievalSpeed = getRetrievalSpeed();
       const pageStart = "";
       const pageEnd = "";
 
@@ -1752,8 +1965,22 @@
           latency_ms: "",
           latency_display: "0s",
           verification_verdict: "n/a",
+          retrieval_speed: retrievalSpeed,
+          retrieval_mode: "",
+          retriever_used: "",
+          query_shape: "",
+          reranker_used: "",
+          retrieved_chunks: "",
           graph_context_enabled: useGraphContext,
           graph_chunks_added: 0,
+          planning_ms: "",
+          retrieval_ms: "",
+          graph_ms: "",
+          context_build_ms: "",
+          time_to_first_token_ms: "",
+          ollama_ms: "",
+          audit_save_ms: "",
+          total_latency_ms: "",
           progress: 5,
           progress_label: "Starting...",
         }
@@ -1765,6 +1992,7 @@
 
       params.set("q", q);
       params.set("request_id", activeRequestId);
+      params.set("retrieval_speed", retrievalSpeed);
 
       if (currentConversationId) params.set("conversation_id", currentConversationId);
       if (sourceId) params.set("source_id", sourceId);
@@ -1802,8 +2030,22 @@
             latency_ms: "",
             latency_display: meta.latency_display || "0s",
             verification_verdict: data.verification_verdict || "pending",
+            retrieval_speed: data.retrieval_speed || retrievalSpeed,
+            retrieval_mode: data.retrieval_mode || "",
+            retriever_used: data.retriever_used || data.retrieval_mode || "",
+            query_shape: data.query_shape || "",
+            reranker_used: data.reranker_used,
+            retrieved_chunks: data.retrieved_chunks ?? "",
             graph_context_enabled: Boolean(data.graph_context_enabled),
             graph_chunks_added: data.graph_chunks_added ?? 0,
+            planning_ms: data.planning_ms,
+            retrieval_ms: data.retrieval_ms,
+            graph_ms: data.graph_ms,
+            context_build_ms: data.context_build_ms,
+            time_to_first_token_ms: data.time_to_first_token_ms,
+            ollama_ms: data.ollama_ms,
+            audit_save_ms: data.audit_save_ms,
+            total_latency_ms: data.total_latency_ms,
             progress: data.progress ?? 15,
             progress_label: data.progress_label || "Searching evidence.",
           };
@@ -1816,8 +2058,22 @@
           citations = Array.isArray(data.citations) ? data.citations : [];
           meta.progress = data.progress ?? 35;
           meta.progress_label = data.progress_label || "Evidence found. Generating answer.";
+          meta.retrieval_speed = data.retrieval_speed || meta.retrieval_speed || retrievalSpeed;
+          meta.retrieval_mode = data.retrieval_mode || meta.retrieval_mode || "";
+          meta.retriever_used = data.retriever_used || data.retrieval_mode || meta.retriever_used || "";
+          meta.query_shape = data.query_shape || meta.query_shape || "";
+          meta.reranker_used = data.reranker_used ?? meta.reranker_used;
+          meta.retrieved_chunks = data.retrieved_chunks ?? meta.retrieved_chunks ?? "";
           meta.graph_context_enabled = Boolean(data.graph_context_enabled ?? meta.graph_context_enabled);
           meta.graph_chunks_added = data.graph_chunks_added ?? meta.graph_chunks_added ?? 0;
+          meta.planning_ms = data.planning_ms ?? meta.planning_ms;
+          meta.retrieval_ms = data.retrieval_ms ?? meta.retrieval_ms;
+          meta.graph_ms = data.graph_ms ?? meta.graph_ms;
+          meta.context_build_ms = data.context_build_ms ?? meta.context_build_ms;
+          meta.time_to_first_token_ms = data.time_to_first_token_ms ?? meta.time_to_first_token_ms;
+          meta.ollama_ms = data.ollama_ms ?? meta.ollama_ms;
+          meta.audit_save_ms = data.audit_save_ms ?? meta.audit_save_ms;
+          meta.total_latency_ms = data.total_latency_ms ?? meta.total_latency_ms;
           updateLastAssistant(answer || "Evidence found. Generating answer...", { meta, citations });
         });
 
@@ -1926,6 +2182,20 @@
 
           meta.progress = data.progress ?? 100;
           meta.progress_label = data.progress_label || "Done.";
+          meta.retrieval_speed = data.retrieval_speed || meta.retrieval_speed || retrievalSpeed;
+          meta.retrieval_mode = data.retrieval_mode || meta.retrieval_mode || "";
+          meta.retriever_used = data.retriever_used || data.retrieval_mode || meta.retriever_used || "";
+          meta.query_shape = data.query_shape || meta.query_shape || "";
+          meta.reranker_used = data.reranker_used ?? meta.reranker_used;
+          meta.retrieved_chunks = data.retrieved_chunks ?? meta.retrieved_chunks ?? "";
+          meta.planning_ms = data.planning_ms ?? meta.planning_ms;
+          meta.retrieval_ms = data.retrieval_ms ?? meta.retrieval_ms;
+          meta.graph_ms = data.graph_ms ?? meta.graph_ms;
+          meta.context_build_ms = data.context_build_ms ?? meta.context_build_ms;
+          meta.time_to_first_token_ms = data.time_to_first_token_ms ?? meta.time_to_first_token_ms;
+          meta.ollama_ms = data.ollama_ms ?? meta.ollama_ms;
+          meta.audit_save_ms = data.audit_save_ms ?? meta.audit_save_ms;
+          meta.total_latency_ms = data.total_latency_ms ?? meta.total_latency_ms ?? data.latency_ms;
 
           const finalAnswer = answer.trim()
             ? answer

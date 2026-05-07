@@ -142,9 +142,137 @@ def _extract_comparison_entities(query: str) -> list[str]:
     return []
 
 
+def _apply_fast_mode(plan: dict[str, Any]) -> dict[str, Any]:
+    """
+    Fast mode trades depth for speed.
+
+    It is intended for quick factual/entity/exact searches, not deep summaries.
+    """
+    fast = dict(plan)
+    fast["retrieval_speed"] = "fast"
+
+    query_shape = str(fast.get("query_shape") or "normal_qa")
+
+    if query_shape == "exact_phrase":
+        fast.update(
+            {
+                "candidate_top_k": 10,
+                "final_top_k": 3,
+                "keyword_top_k": 8,
+                "neighbour_window": 0,
+                "use_keyword_search": True,
+                "use_vector_search": False,
+                "use_reranker": False,
+                "planner_reason": str(fast.get("planner_reason", "")) + " Fast mode: FTS5 only, top 3 chunks, no reranker.",
+            }
+        )
+        return fast
+
+    if query_shape == "entity_lookup":
+        fast.update(
+            {
+                "candidate_top_k": 15,
+                "final_top_k": 3,
+                "keyword_top_k": 10,
+                "neighbour_window": 0,
+                "use_keyword_search": True,
+                "use_vector_search": False,
+                "use_reranker": False,
+                "planner_reason": str(fast.get("planner_reason", "")) + " Fast mode: FTS5-first entity lookup, top 3 chunks, no reranker.",
+            }
+        )
+        return fast
+
+    if query_shape in {"comparison", "troubleshooting", "code_explanation"}:
+        fast.update(
+            {
+                "candidate_top_k": 25,
+                "final_top_k": 4,
+                "keyword_top_k": 15,
+                "neighbour_window": 0,
+                "use_keyword_search": True,
+                "use_vector_search": True,
+                "use_reranker": False,
+                "planner_reason": str(fast.get("planner_reason", "")) + " Fast mode: smaller hybrid search, no reranker.",
+            }
+        )
+        return fast
+
+    fast.update(
+        {
+            "candidate_top_k": 20,
+            "final_top_k": 3,
+            "keyword_top_k": 10,
+            "neighbour_window": 0,
+            "use_reranker": False,
+            "planner_reason": str(fast.get("planner_reason", "")) + " Fast mode: reduced search breadth and shorter context.",
+        }
+    )
+    return fast
+
+
+def _apply_direct_mode(plan: dict[str, Any]) -> dict[str, Any]:
+    """
+    Direct mode is fastest.
+
+    It retrieves only the strongest evidence and lets the backend return
+    a deterministic citation/snippet answer without calling Ollama for
+    simple lookup/search questions.
+    """
+    direct = dict(plan)
+    direct["retrieval_speed"] = "direct"
+
+    query_shape = str(direct.get("query_shape") or "normal_qa")
+
+    if query_shape == "exact_phrase":
+        direct.update(
+            {
+                "candidate_top_k": 6,
+                "final_top_k": 2,
+                "keyword_top_k": 5,
+                "neighbour_window": 0,
+                "use_keyword_search": True,
+                "use_vector_search": False,
+                "use_reranker": False,
+                "planner_reason": str(direct.get("planner_reason", "")) + " Direct mode: exact FTS5 snippets only, no Ollama.",
+            }
+        )
+        return direct
+
+    if query_shape == "entity_lookup":
+        direct.update(
+            {
+                "candidate_top_k": 8,
+                "final_top_k": 3,
+                "keyword_top_k": 6,
+                "neighbour_window": 0,
+                "use_keyword_search": True,
+                "use_vector_search": False,
+                "use_reranker": False,
+                "planner_reason": str(direct.get("planner_reason", "")) + " Direct mode: FTS5 entity snippets only, no Ollama.",
+            }
+        )
+        return direct
+
+    direct.update(
+        {
+            "candidate_top_k": 10,
+            "final_top_k": 3,
+            "keyword_top_k": 8,
+            "neighbour_window": 0,
+            "use_keyword_search": True,
+            "use_vector_search": False,
+            "use_reranker": False,
+            "planner_reason": str(direct.get("planner_reason", "")) + " Direct mode: reduced FTS5-only lookup.",
+        }
+    )
+    return direct
+
+
 def build_adaptive_retrieval_plan(
     query: str,
     base_plan: dict[str, Any] | None = None,
+    retrieval_speed: str = "normal",
 ) -> dict[str, Any]:
     """
     Deterministic retrieval planner.
@@ -181,6 +309,7 @@ def build_adaptive_retrieval_plan(
         "comparison_entities": [],
         "exact_phrases": quoted,
         "planner_reason": "Default vector + rerank retrieval.",
+        "retrieval_speed": "normal",
     }
 
     if quoted:
@@ -199,7 +328,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Quoted phrase detected, so exact phrase retrieval uses FTS5 only and disables vector/reranker noise.",
             }
         )
-        return plan
+        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
 
     if _looks_like_comparison(clean_query):
         entities = _extract_comparison_entities(clean_query)
@@ -219,7 +348,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Comparison query detected, so retrieval must preserve evidence from multiple entities/sources.",
             }
         )
-        return plan
+        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
 
     if _looks_like_troubleshooting(clean_query) or pipeline == "incident_runbook":
         plan.update(
@@ -235,7 +364,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Troubleshooting query detected, so exact error terms and nearby chunks matter.",
             }
         )
-        return plan
+        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
 
     if _looks_like_overview(clean_query) or pipeline == "document_summary":
         plan.update(
@@ -251,7 +380,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Overview query detected, so section-leading and neighbouring chunks are useful.",
             }
         )
-        return plan
+        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
 
     if _looks_like_code(clean_query) or pipeline == "repo_explanation":
         plan.update(
@@ -267,7 +396,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Code/repo query detected, so filenames, symbols, and adjacent chunks matter.",
             }
         )
-        return plan
+        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
 
     if _looks_like_entity_lookup(clean_query):
         plan.update(
@@ -283,7 +412,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Entity lookup detected, so keyword-first hybrid retrieval is safer than vector-only retrieval.",
             }
         )
-        return plan
+        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
 
     if PAGE_RE.search(clean_query):
         plan.update(
@@ -298,6 +427,6 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Page/section reference detected, so neighbouring chunks are useful.",
             }
         )
-        return plan
+        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
 
-    return plan
+    return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)

@@ -19,6 +19,7 @@ from app.chat_history import (
 )
 from app.context_utils import build_citations, build_context_text, compact_chunks
 from app.followup_resolver import resolve_followup_question
+from app.graph_retrieval import expand_with_graph_context
 from app.llm_client import CHAT_MODEL, LLMCancelled, generate_text, stream_generate_text
 from app.metadata_db import MetadataDB
 from app.prompts import (
@@ -420,6 +421,193 @@ def _default_regular_chat_source_ids() -> list[str]:
 
     return source_ids
 
+
+def _clean_direct_snippet(text: str, max_chars: int = 900) -> str:
+    value = re.sub(r"\s+", " ", str(text or "").strip())
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars].rstrip() + " ..."
+
+
+def _extract_entity_from_lookup_question(question: str) -> str:
+    q = re.sub(r"\s+", " ", str(question or "").strip())
+    patterns = [
+        r"^\s*who\s+is\s+(.+?)\s*\??$",
+        r"^\s*who\s+was\s+(.+?)\s*\??$",
+        r"^\s*what\s+is\s+(.+?)\s*\??$",
+        r"^\s*where\s+is\s+(.+?)\s*\??$",
+        r"^\s*tell\s+me\s+about\s+(.+?)\s*\??$",
+        r"^\s*define\s+(.+?)\s*\??$",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, q, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip(" .,:;?!'\"")
+
+    return q.strip(" .,:;?!'\"")
+
+
+def _direct_answer_from_chunks(
+    *,
+    question: str,
+    chunks: list[dict[str, Any]],
+    citations: list[dict[str, Any]],
+    query_shape: str,
+    retrieval_mode: str,
+) -> str:
+    if not chunks:
+        return "No evidence found in the knowledge base."
+
+    top = chunks[0]
+    source = top.get("source") or "retrieved source"
+    chunk_index = top.get("chunk_index", "")
+    snippet = _clean_direct_snippet(top.get("text", ""), max_chars=900)
+
+    if query_shape == "exact_phrase":
+        return (
+            f"Found a matching passage in {source}, chunk {chunk_index}.\n\n"
+            f"{snippet}\n\n"
+            f"Open citation [1] for the full evidence."
+        )
+
+    if query_shape == "entity_lookup":
+        entity = _extract_entity_from_lookup_question(question)
+        return (
+            f"Based on the top retrieved evidence, {entity} is mentioned in {source}, chunk {chunk_index}.\n\n"
+            f"{snippet}\n\n"
+            f"Open the citations for full context."
+        )
+
+    return (
+        f"Top matching evidence found in {source}, chunk {chunk_index}.\n\n"
+        f"{snippet}\n\n"
+        f"Open the citations for full context."
+    )
+
+
+def _can_use_direct_answer(
+    *,
+    retrieval_speed: str,
+    pipeline_used: str,
+    query_shape: str,
+    exact_file_mode: bool,
+) -> bool:
+    if retrieval_speed != "direct":
+        return False
+
+    if exact_file_mode:
+        return False
+
+    if pipeline_used not in {"normal_qa"}:
+        return False
+
+    return query_shape in {"entity_lookup", "exact_phrase", "normal_qa", "section_summary"}
+
+
+def _mode_label_from_speed(retrieval_speed: str) -> str:
+    clean = str(retrieval_speed or "normal").lower()
+    if clean == "direct":
+        return "Direct"
+    if clean == "fast":
+        return "Quick AI"
+    if clean == "background_summary":
+        return "Background Summary"
+    return "Deep AI"
+
+
+def _build_answer_metadata(
+    *,
+    routing: dict[str, Any],
+    pipeline_used: str,
+    retrieval_speed: str,
+    actual_retrieval_mode: str,
+    actual_retriever_used: str,
+    actual_query_shape: str,
+    actual_reranker_used: Any,
+    actual_neighbour_window: Any,
+    actual_retrieval_reason: str,
+    actual_adaptive_retrieval: bool,
+    retrieved_chunks: int,
+    use_graph_context: bool,
+    graph_chunks_added: int,
+    verification_result: dict[str, Any],
+    latency_ms: int,
+    requested_file: str | None = None,
+    resolved_file: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "pipeline_used": pipeline_used,
+        "pipeline_label": routing.get("pipeline_label") or pipeline_used,
+        "intent": routing.get("intent"),
+        "intent_confidence": routing.get("confidence"),
+        "intent_reason": routing.get("reason"),
+        "router": routing.get("router"),
+        "question_type": routing.get("question_type"),
+        "source_strategy": routing.get("source_strategy"),
+        "retrieval_speed": retrieval_speed,
+        "mode_label": _mode_label_from_speed(retrieval_speed),
+        "retrieval_mode": actual_retrieval_mode,
+        "retriever_used": actual_retriever_used or actual_retrieval_mode,
+        "query_shape": actual_query_shape,
+        "reranker_used": actual_reranker_used,
+        "neighbour_window": actual_neighbour_window,
+        "retrieval_planner_reason": actual_retrieval_reason,
+        "adaptive_retrieval": actual_adaptive_retrieval,
+        "retrieved_chunks": retrieved_chunks,
+        "verification_verdict": verification_result.get("verification_verdict"),
+        "verification_reason": verification_result.get("verification_reason"),
+        "unsupported_claims": verification_result.get("unsupported_claims", []),
+        "verified": verification_result.get("verified", False),
+        "graph_context_enabled": bool(use_graph_context),
+        "graph_chunks_added": graph_chunks_added,
+        "latency_ms": latency_ms,
+        "progress": 100,
+        "progress_label": "Done.",
+        "requested_file": requested_file,
+        "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
+        "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
+    }
+
+
+
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.perf_counter() - started_at) * 1000)
+
+
+def _new_timing_breakdown() -> dict[str, int | None]:
+    return {
+        "planning_ms": None,
+        "retrieval_ms": None,
+        "graph_ms": None,
+        "context_build_ms": None,
+        "time_to_first_token_ms": None,
+        "ollama_ms": None,
+        "audit_save_ms": None,
+        "total_latency_ms": None,
+    }
+
+
+def _finalize_timing(timings: dict[str, int | None], started_at: float) -> dict[str, int | None]:
+    timings["total_latency_ms"] = _elapsed_ms(started_at)
+    return timings
+
+
+def _timing_payload(timings: dict[str, int | None]) -> dict[str, int | None]:
+    return {
+        "planning_ms": timings.get("planning_ms"),
+        "retrieval_ms": timings.get("retrieval_ms"),
+        "graph_ms": timings.get("graph_ms"),
+        "context_build_ms": timings.get("context_build_ms"),
+        "time_to_first_token_ms": timings.get("time_to_first_token_ms"),
+        "ollama_ms": timings.get("ollama_ms"),
+        "audit_save_ms": timings.get("audit_save_ms"),
+        "total_latency_ms": timings.get("total_latency_ms"),
+    }
+
+
 def stream_ask_events(
     question: str,
     conversation_id: str | None = None,
@@ -431,8 +619,11 @@ def stream_ask_events(
     page_end: int | None = None,
     request_id: str | None = None,
     use_graph_context: bool = False,
+    retrieval_speed: str = "normal",
 ) -> Iterator[str]:
     started = time.perf_counter()
+    timings = _new_timing_breakdown()
+    planning_started = time.perf_counter()
     request_id = register_request(request_id)
 
     def cancelled() -> bool:
@@ -449,6 +640,8 @@ def stream_ask_events(
 
     try:
         normalized_question = normalize_question(question)
+        speed_value = str(retrieval_speed or "").lower()
+        clean_retrieval_speed = "direct" if speed_value == "direct" else ("fast" if speed_value == "fast" else "normal")
 
         yield _sse(
             "request",
@@ -506,12 +699,14 @@ def stream_ask_events(
         planned_retrieval_mode = (
             "exact_file_source_id_lookup"
             if exact_file_mode
-            else ("vector_graph_search" if use_graph_context else "adaptive_hybrid_search")
+            else ("vector_graph_search" if use_graph_context else "adaptive_hybrid_search_direct" if clean_retrieval_speed == "direct" else ("adaptive_hybrid_search_fast" if clean_retrieval_speed == "fast" else "adaptive_hybrid_search"))
         )
 
         if cancelled():
             yield _sse("cancelled", cancel_payload("after_planning"))
             return
+
+        timings["planning_ms"] = _elapsed_ms(planning_started)
 
         yield _sse(
             "meta",
@@ -531,6 +726,11 @@ def stream_ask_events(
                 "question_type": routing.get("question_type"),
                 "source_strategy": routing.get("source_strategy"),
                 "retrieval_mode": planned_retrieval_mode,
+                "retrieval_speed": clean_retrieval_speed,
+                "retriever_used": "",
+                "query_shape": "",
+                "reranker_used": None,
+                "retrieved_chunks": 0,
                 "graph_context_enabled": bool(use_graph_context and not exact_file_mode),
                 "graph_chunks_added": 0,
                 "requested_file": requested_file,
@@ -541,6 +741,7 @@ def stream_ask_events(
                 "verification_verdict": "pending" if pipeline_used in {"long_explanation", "repo_explanation", "incident_runbook"} else "skipped",
                 "progress": 15,
                 "progress_label": "Planning complete. Searching evidence.",
+                **_timing_payload(timings),
             },
         )
 
@@ -574,6 +775,21 @@ def stream_ask_events(
 
         retrieval_limit, num_predict = _pipeline_limits(pipeline_used)
 
+        if clean_retrieval_speed == "fast":
+            retrieval_limit = min(retrieval_limit, 3)
+            if pipeline_used == "normal_qa":
+                num_predict = min(num_predict, 180)
+            elif pipeline_used == "incident_runbook":
+                num_predict = min(num_predict, 450)
+            elif pipeline_used == "repo_explanation":
+                num_predict = min(num_predict, 500)
+            elif pipeline_used == "long_explanation":
+                num_predict = min(num_predict, 700)
+
+        if clean_retrieval_speed == "direct":
+            retrieval_limit = min(retrieval_limit, 3)
+            num_predict = 0
+
         # Exact file/code explanation should be smaller and faster than repo-wide explanation.
         # It already uses exact chunks by source_id, so avoid oversized generation.
         if exact_file_mode:
@@ -591,6 +807,8 @@ def stream_ask_events(
         default_allowed_source_ids = None
         if not source_id:
             default_allowed_source_ids = _default_regular_chat_source_ids()
+
+        retrieval_started = time.perf_counter()
 
         if exact_file_mode and requested_file:
             chunks, resolved_file = _retrieve_exact_file_chunks(
@@ -613,10 +831,36 @@ def stream_ask_events(
                 page_start=page_start,
                 page_end=page_end,
                 retrieval_plan=retrieval_plan,
-                use_graph_context=bool(use_graph_context),
-                graph_max_chunks=3,
+                use_graph_context=False,
+                graph_max_chunks=0,
                 allowed_source_ids=default_allowed_source_ids,
+                retrieval_speed=clean_retrieval_speed,
             )
+
+        timings["retrieval_ms"] = _elapsed_ms(retrieval_started)
+
+        graph_context_meta: dict[str, Any] = {}
+        graph_chunks_added = 0
+
+        if use_graph_context and not exact_file_mode and chunks:
+            graph_started = time.perf_counter()
+
+            chunks, graph_context_meta = expand_with_graph_context(
+                chunks,
+                max_graph_chunks=3,
+            )
+
+            timings["graph_ms"] = _elapsed_ms(graph_started)
+
+            for hit in chunks:
+                hit.setdefault("graph_context_enabled", True)
+
+            if chunks:
+                chunks[0]["graph_context_meta"] = graph_context_meta
+
+            graph_chunks_added = len([c for c in chunks if c.get("graph_context")])
+        else:
+            timings["graph_ms"] = 0
 
         if cancelled():
             yield _sse("cancelled", cancel_payload("after_retrieval"))
@@ -644,6 +888,21 @@ def stream_ask_events(
         actual_adaptive_retrieval = bool(
             chunks and chunks[0].get("adaptive_retrieval", False)
         )
+        actual_retriever_used = (
+            str(chunks[0].get("retriever_used") or "")
+            if chunks
+            else ""
+        )
+        actual_reranker_used = (
+            chunks[0].get("reranker_used")
+            if chunks
+            else None
+        )
+        actual_neighbour_window = (
+            chunks[0].get("neighbour_window")
+            if chunks
+            else None
+        )
 
         if not chunks:
             RAG_NO_EVIDENCE_TOTAL.labels(pipeline=pipeline_used).inc()
@@ -657,13 +916,18 @@ def stream_ask_events(
                     "progress": 35,
                     "progress_label": "No evidence found.",
                     "retrieval_mode": actual_retrieval_mode,
+                    "retrieval_speed": clean_retrieval_speed,
+                    "retriever_used": actual_retriever_used,
                     "query_shape": actual_query_shape,
+                    "reranker_used": actual_reranker_used,
+                    "neighbour_window": actual_neighbour_window,
                     "retrieval_planner_reason": actual_retrieval_reason,
                     "adaptive_retrieval": actual_adaptive_retrieval,
                     "requested_file": requested_file,
                     "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
                     "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
                     "retrieved_chunks": 0,
+                    **_timing_payload(timings),
                 },
             )
             yield _sse("token", {"token": answer, "progress": 100, "progress_label": "Done."})
@@ -679,25 +943,26 @@ def stream_ask_events(
                     "progress": 100,
                     "progress_label": "Done.",
                     "retrieval_mode": actual_retrieval_mode,
+                    "retrieval_speed": clean_retrieval_speed,
+                    "retriever_used": actual_retriever_used,
                     "query_shape": actual_query_shape,
+                    "reranker_used": actual_reranker_used,
+                    "neighbour_window": actual_neighbour_window,
                     "retrieval_planner_reason": actual_retrieval_reason,
                     "adaptive_retrieval": actual_adaptive_retrieval,
                     "requested_file": requested_file,
                     "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
                     "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
                     "retrieved_chunks": 0,
+                    **_timing_payload(timings),
                 },
             )
             return
 
-        graph_chunks_added = len([c for c in chunks if c.get("graph_context")])
         if use_graph_context and not exact_file_mode:
             RAG_GRAPH_CONTEXT_ENABLED_TOTAL.labels(pipeline=pipeline_used).inc()
             if graph_chunks_added > 0:
                 RAG_GRAPH_CHUNKS_ADDED_TOTAL.labels(pipeline=pipeline_used).inc(graph_chunks_added)
-        graph_context_meta = {}
-        if chunks and isinstance(chunks[0].get("graph_context_meta"), dict):
-            graph_context_meta = chunks[0].get("graph_context_meta") or {}
 
         if not exact_file_mode:
             top_score = max(float(c.get("score", 0.0) or 0.0) for c in chunks)
@@ -730,12 +995,152 @@ def stream_ask_events(
                 )
                 return
 
+        context_build_started = time.perf_counter()
+
         compacted = compact_chunks(
             chunks,
             max_total_chars=18000 if exact_file_mode else 11000,
         )
         citations = build_citations(compacted)
         context_text = build_context_text(compacted)
+
+        timings["context_build_ms"] = _elapsed_ms(context_build_started)
+
+        if _can_use_direct_answer(
+            retrieval_speed=clean_retrieval_speed,
+            pipeline_used=pipeline_used,
+            query_shape=actual_query_shape,
+            exact_file_mode=exact_file_mode,
+        ):
+            answer = _direct_answer_from_chunks(
+                question=effective_question,
+                chunks=compacted,
+                citations=citations,
+                query_shape=actual_query_shape,
+                retrieval_mode=actual_retrieval_mode,
+            )
+
+            yield _sse(
+                "citations",
+                {
+                    "citations": citations,
+                    "progress": 35,
+                    "progress_label": "Evidence found. Returning direct answer.",
+                    "retrieval_mode": actual_retrieval_mode,
+                    "retrieval_speed": clean_retrieval_speed,
+                    "retriever_used": actual_retriever_used,
+                    "query_shape": actual_query_shape,
+                    "reranker_used": actual_reranker_used,
+                    "neighbour_window": actual_neighbour_window,
+                    "retrieval_planner_reason": actual_retrieval_reason,
+                    "adaptive_retrieval": actual_adaptive_retrieval,
+                    "requested_file": requested_file,
+                    "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
+                    "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
+                    "retrieved_chunks": len(compacted),
+                    "graph_context_enabled": bool(use_graph_context and not exact_file_mode),
+                    "graph_chunks_added": graph_chunks_added if not exact_file_mode else 0,
+                    "graph_reason": graph_context_meta.get("graph_reason", ""),
+                    **_timing_payload(timings),
+                },
+            )
+
+            yield _sse(
+                "token",
+                {
+                    "token": answer,
+                    "progress": 95,
+                    "progress_label": "Direct answer ready.",
+                },
+            )
+
+            verification_result = {
+                "verification_verdict": "skipped_direct",
+                "unsupported_claims": [],
+                "verification_reason": "Direct mode skipped Ollama and returned retrieved evidence snippet.",
+                "verified": False,
+            }
+
+            timings = _finalize_timing(timings, started)
+            latency_seconds = time.perf_counter() - started
+            latency_ms = int(latency_seconds * 1000)
+
+            answer_metadata = _build_answer_metadata(
+                routing=routing,
+                pipeline_used=pipeline_used,
+                retrieval_speed=clean_retrieval_speed,
+                actual_retrieval_mode=actual_retrieval_mode,
+                actual_retriever_used=actual_retriever_used,
+                actual_query_shape=actual_query_shape,
+                actual_reranker_used=actual_reranker_used,
+                actual_neighbour_window=actual_neighbour_window,
+                actual_retrieval_reason=actual_retrieval_reason,
+                actual_adaptive_retrieval=actual_adaptive_retrieval,
+                retrieved_chunks=len(compacted),
+                use_graph_context=bool(use_graph_context and not exact_file_mode),
+                graph_chunks_added=graph_chunks_added if not exact_file_mode else 0,
+                verification_result=verification_result,
+                latency_ms=latency_ms,
+                requested_file=requested_file,
+                resolved_file=resolved_file,
+            )
+            answer_metadata.update(_timing_payload(timings))
+
+            audit_save_started = time.perf_counter()
+
+            add_assistant_message(
+                conversation_id=resolved_conversation_id,
+                answer=answer,
+                citations=citations,
+                intent=routing.get("intent"),
+                pipeline_used=pipeline_used,
+                metadata=answer_metadata,
+            )
+            RAG_QUESTIONS_TOTAL.labels(pipeline=pipeline_used, status="success").inc()
+            RAG_ANSWER_LATENCY_SECONDS.labels(pipeline=pipeline_used, status="success").observe(latency_seconds)
+            audit_id = save_audit_event(
+                conversation_id=resolved_conversation_id,
+                question=normalized_question,
+                answer=answer,
+                routing={**routing, **verification_result},
+                citations=citations,
+                model="direct_backend_snippet",
+                latency_ms=latency_ms,
+            )
+
+            timings["audit_save_ms"] = _elapsed_ms(audit_save_started)
+            timings = _finalize_timing(timings, started)
+
+            yield _sse(
+                "done",
+                {
+                    "status": "done",
+                    "request_id": request_id,
+                    "audit_id": audit_id,
+                    "latency_ms": latency_ms,
+                    "citations": citations,
+                    "verification_verdict": verification_result.get("verification_verdict"),
+                    "unsupported_claims": [],
+                    "verification_reason": verification_result.get("verification_reason"),
+                    "verified": False,
+                    "progress": 100,
+                    "progress_label": "Done.",
+                    "retrieval_mode": actual_retrieval_mode,
+                    "retrieval_speed": clean_retrieval_speed,
+                    "retriever_used": actual_retriever_used,
+                    "query_shape": actual_query_shape,
+                    "reranker_used": actual_reranker_used,
+                    "neighbour_window": actual_neighbour_window,
+                    "retrieval_planner_reason": actual_retrieval_reason,
+                    "adaptive_retrieval": actual_adaptive_retrieval,
+                    "requested_file": requested_file,
+                    "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
+                    "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
+                    "retrieved_chunks": len(compacted),
+                    **_timing_payload(timings),
+                },
+            )
+            return
 
         prompt_question = (
             _exact_file_question_for_prompt(effective_question, requested_file)
@@ -758,7 +1163,11 @@ def stream_ask_events(
                 "progress": 35,
                 "progress_label": "Evidence found. Generating answer.",
                 "retrieval_mode": actual_retrieval_mode,
+                    "retrieval_speed": clean_retrieval_speed,
+                    "retriever_used": actual_retriever_used,
                     "query_shape": actual_query_shape,
+                    "reranker_used": actual_reranker_used,
+                    "neighbour_window": actual_neighbour_window,
                     "retrieval_planner_reason": actual_retrieval_reason,
                     "adaptive_retrieval": actual_adaptive_retrieval,
                 "requested_file": requested_file,
@@ -772,6 +1181,8 @@ def stream_ask_events(
         )
 
         answer_parts: list[str] = []
+        ollama_started = time.perf_counter()
+        first_token_recorded = False
 
         try:
             for token in stream_generate_text(
@@ -785,6 +1196,10 @@ def stream_ask_events(
                     yield _sse("cancelled", cancel_payload("answer_generation"))
                     return
 
+                if not first_token_recorded:
+                    timings["time_to_first_token_ms"] = _elapsed_ms(started)
+                    first_token_recorded = True
+
                 answer_parts.append(token)
                 progress = min(85, 45 + (len("".join(answer_parts)) // 120))
                 yield _sse("token", {"token": token, "progress": progress, "progress_label": "Generating answer."})
@@ -792,6 +1207,8 @@ def stream_ask_events(
         except LLMCancelled:
             yield _sse("cancelled", cancel_payload("answer_generation"))
             return
+
+        timings["ollama_ms"] = _elapsed_ms(ollama_started)
 
         answer = "".join(answer_parts).strip() or "No evidence found in the knowledge base."
 
@@ -1055,16 +1472,41 @@ def stream_ask_events(
             yield _sse("cancelled", cancel_payload("before_save"))
             return
 
+        timings = _finalize_timing(timings, started)
+        latency_seconds = time.perf_counter() - started
+        latency_ms = int(latency_seconds * 1000)
+
+        answer_metadata = _build_answer_metadata(
+            routing=routing,
+            pipeline_used=pipeline_used,
+            retrieval_speed=clean_retrieval_speed,
+            actual_retrieval_mode=actual_retrieval_mode,
+            actual_retriever_used=actual_retriever_used,
+            actual_query_shape=actual_query_shape,
+            actual_reranker_used=actual_reranker_used,
+            actual_neighbour_window=actual_neighbour_window,
+            actual_retrieval_reason=actual_retrieval_reason,
+            actual_adaptive_retrieval=actual_adaptive_retrieval,
+            retrieved_chunks=len(compacted),
+            use_graph_context=bool(use_graph_context and not exact_file_mode),
+            graph_chunks_added=graph_chunks_added if not exact_file_mode else 0,
+            verification_result=verification_result,
+            latency_ms=latency_ms,
+            requested_file=requested_file,
+            resolved_file=resolved_file,
+        )
+        answer_metadata.update(_timing_payload(timings))
+
+        audit_save_started = time.perf_counter()
+
         add_assistant_message(
             conversation_id=resolved_conversation_id,
             answer=answer,
             citations=citations,
             intent=routing.get("intent"),
             pipeline_used=pipeline_used,
+            metadata=answer_metadata,
         )
-
-        latency_seconds = time.perf_counter() - started
-        latency_ms = int(latency_seconds * 1000)
         RAG_QUESTIONS_TOTAL.labels(pipeline=pipeline_used, status="success").inc()
         RAG_ANSWER_LATENCY_SECONDS.labels(pipeline=pipeline_used, status="success").observe(latency_seconds)
         audit_id = save_audit_event(
@@ -1076,6 +1518,9 @@ def stream_ask_events(
             model=CHAT_MODEL,
             latency_ms=latency_ms,
         )
+
+        timings["audit_save_ms"] = _elapsed_ms(audit_save_started)
+        timings = _finalize_timing(timings, started)
 
         yield _sse(
             "done",
@@ -1092,13 +1537,18 @@ def stream_ask_events(
                 "progress": 100,
                 "progress_label": "Done.",
                 "retrieval_mode": actual_retrieval_mode,
+                    "retrieval_speed": clean_retrieval_speed,
+                    "retriever_used": actual_retriever_used,
                     "query_shape": actual_query_shape,
+                    "reranker_used": actual_reranker_used,
+                    "neighbour_window": actual_neighbour_window,
                     "retrieval_planner_reason": actual_retrieval_reason,
                     "adaptive_retrieval": actual_adaptive_retrieval,
                 "requested_file": requested_file,
                 "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
                 "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
                 "retrieved_chunks": len(compacted),
+                **_timing_payload(timings),
             },
         )
 
