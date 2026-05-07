@@ -17,26 +17,35 @@ It is designed as a production-style private AI assistant that can ingest engine
 7. [Services](#services)
 8. [Latest Features Added](#latest-features-added)
    - [1. Rules-First Intent Router](#1-rules-first-intent-router)
-   - [2. RAG Orchestrator](#2-rag-orchestrator)
-   - [3. Prompt Library](#3-prompt-library)
-   - [4. Multiple Answer Pipelines](#4-multiple-answer-pipelines)
-   - [5. Streaming Answer UI](#5-streaming-answer-ui)
-   - [6. Latency Timer and Progress Bar](#6-latency-timer-and-progress-bar)
-   - [7. Local BGE Reranker](#7-local-bge-reranker)
-   - [8. Clickable Citations](#8-clickable-citations)
-   - [9. Chat History Support](#9-chat-history-support)
-   - [10. SQLite Persistence](#10-sqlite-persistence)
-   - [11. Audit Logging](#11-audit-logging)
-   - [12. Answer Verifier and Recovery Layer](#12-answer-verifier-and-recovery-layer)
-   - [13. Admin UI](#13-admin-ui)
-   - [14. Graph UI and Knowledge Graph](#14-graph-ui-and-knowledge-graph)
-   - [15. Automatic Graph Build on Ingest](#15-automatic-graph-build-on-ingest)
-   - [16. DOCX Ingestion](#16-docx-ingestion)
-   - [17. Duplicate Upload Handling](#17-duplicate-upload-handling)
-   - [18. Cancellation Support](#18-cancellation-support)
-   - [19. Prometheus and Grafana Observability](#19-prometheus-and-grafana-observability)
-   - [20. Async Ingestion Jobs and Large File Support](#20-async-ingestion-jobs-and-large-file-support)
-   - [21. Ingestion Progress, Cancel, Retry, and Build Graph Controls](#21-ingestion-progress-cancel-retry-and-build-graph-controls)
+   - [2. Universal Adaptive Retrieval Planner](#2-universal-adaptive-retrieval-planner)
+   - [3. Hybrid FTS5 + Qdrant Retrieval](#3-hybrid-fts5--qdrant-retrieval)
+   - [4. Deep AI, Quick AI, and Direct Modes](#4-deep-ai-quick-ai-and-direct-modes)
+   - [5. Runtime Performance Tuning Dashboard](#5-runtime-performance-tuning-dashboard)
+   - [6. Per-Answer Tuning Metadata](#6-per-answer-tuning-metadata)
+   - [7. Timing Breakdown per Answer](#7-timing-breakdown-per-answer)
+   - [8. Backend-Enforced Runtime Defaults](#8-backend-enforced-runtime-defaults)
+   - [9. Yes/No Relationship Query Shape](#9-yesno-relationship-query-shape)
+   - [10. Graph Context Decoupled from Base Retrieval](#10-graph-context-decoupled-from-base-retrieval)
+   - [11. RAG Orchestrator](#11-rag-orchestrator)
+   - [12. Prompt Library](#12-prompt-library)
+   - [13. Multiple Answer Pipelines](#13-multiple-answer-pipelines)
+   - [14. Streaming Answer UI](#14-streaming-answer-ui)
+   - [15. Latency Timer and Progress Bar](#15-latency-timer-and-progress-bar)
+   - [16. Local BGE Reranker](#16-local-bge-reranker)
+   - [17. Clickable Citations](#17-clickable-citations)
+   - [18. Chat History Support](#18-chat-history-support)
+   - [19. SQLite Persistence](#19-sqlite-persistence)
+   - [20. Audit Logging](#20-audit-logging)
+   - [21. Answer Verifier and Recovery Layer](#21-answer-verifier-and-recovery-layer)
+   - [22. Admin UI](#22-admin-ui)
+   - [23. Graph UI and Knowledge Graph](#23-graph-ui-and-knowledge-graph)
+   - [24. Automatic Graph Build on Ingest](#24-automatic-graph-build-on-ingest)
+   - [25. DOCX Ingestion](#25-docx-ingestion)
+   - [26. Duplicate Upload Handling](#26-duplicate-upload-handling)
+   - [27. Cancellation Support](#27-cancellation-support)
+   - [28. Prometheus and Grafana Observability](#28-prometheus-and-grafana-observability)
+   - [29. Async Ingestion Jobs and Large File Support](#29-async-ingestion-jobs-and-large-file-support)
+   - [30. Ingestion Progress, Cancel, Retry, and Build Graph Controls](#30-ingestion-progress-cancel-retry-and-build-graph-controls)
 9. [High-Level Request Flow](#high-level-request-flow)
 10. [Question Answering Flow](#question-answering-flow)
 11. [Ingestion Flow](#ingestion-flow)
@@ -78,7 +87,9 @@ It is designed as a production-style private AI assistant that can ingest engine
 
 ![InfraRAG Admin Panel](infrarag_admin_panel.png)
 
-![InfraRAG Chunk UI](infrarag_chunk_ui.png)
+![InfraRAG Chunk UI](graph.png)
+
+
 
 ---
 
@@ -99,12 +110,18 @@ It can:
 - store vectors and metadata in Qdrant
 - store source metadata, ingestion jobs, chunks, conversations, audit logs, and graph data in SQLite
 - retrieve the most relevant chunks for a user question
-- rerank retrieved chunks using a local BGE reranker
+- use FTS5 keyword retrieval, Qdrant vector retrieval, or both depending on query shape
+- rerank retrieved chunks using a local BGE reranker when quality mode needs it
 - route questions automatically to the correct answer pipeline
-- avoid slow LLM planner calls for common factual, follow-up, story, document, repo, and incident questions through rules-first routing
+- plan retrieval using universal query-shape rules instead of source-specific hacks
+- support Deep AI, Quick AI, and Direct response modes
+- expose a runtime tuning dashboard for chunks, context characters, answer token budget, and graph chunks
+- show per-answer tuning values so users know what parameters produced each answer
+- show timing breakdown for planning, retrieval, graph expansion, context build, first token, Ollama generation, audit save, and total latency
+- avoid slow LLM planner calls for common factual, relationship, follow-up, story, document, repo, and incident questions through rules-first routing
 - generate answers using Ollama and `llama3.2:3b`
 - stream answers token-by-token in the UI where supported
-- show pipeline metadata such as pipeline name, confidence, router reason, verifier status, graph status, and latency
+- show pipeline metadata such as pipeline name, confidence, router reason, verifier status, graph status, tuning settings, and latency
 - provide clickable citations linked to source files, chunks, and PDF page numbers where available
 - keep chat history in a ChatGPT-style interface
 - support request cancellation from the UI
@@ -122,10 +139,12 @@ InfraRAG is useful for:
 - explaining private repositories
 - asking questions about Terraform modules
 - understanding AWS, Kubernetes, CI/CD, and DevOps documentation
+- answering relationship questions such as whether one concept is part of another
 - summarising uploaded PDFs, DOCX files, and books
 - searching internal runbooks
 - explaining incidents and troubleshooting steps
 - inspecting source/chunk relationships through a graph view
+- comparing retrieval quality and latency between Deep AI, Quick AI, and Direct modes
 - building a private engineering knowledge assistant for a company
 - demonstrating local AI, RAG, observability, and DevOps platform engineering skills
 
@@ -143,6 +162,7 @@ InfraRAG is useful for:
 | Chat Model | `llama3.2:3b` |
 | Embedding Model | `nomic-embed-text` |
 | Vector Database | Qdrant |
+| Keyword Search | SQLite FTS5 |
 | Reranker | Local BGE reranker |
 | Persistent Metadata | SQLite |
 | Ingestion Jobs | SQLite-backed job table + in-process background worker |
@@ -186,15 +206,16 @@ It decides whether a user request should go to:
 - Terraform/repository/code explanation
 - incident or runbook troubleshooting
 
-The router now avoids LLM planner calls for many common cases:
+The router avoids LLM planner calls for many common cases:
 
 - direct factual questions
-- "who/what/where/when/which" questions
+- yes/no relationship or classification questions
+- `who`, `what`, `where`, `when`, and `which` questions
 - CV/profile/document lookups
 - story or character questions
 - GitHub repo/name/list questions
-- follow-ups such as "elaborate the above"
-- numbered follow-ups such as "explain point 2"
+- follow-ups such as `elaborate the above`
+- numbered follow-ups such as `explain point 2`
 - incident/debug/error questions
 - repo/code/file explanation questions
 
@@ -202,7 +223,250 @@ This reduces routing latency and avoids wasting 30–90 seconds on the LLM plann
 
 ---
 
-### 2. RAG Orchestrator
+### 2. Universal Adaptive Retrieval Planner
+
+InfraRAG now separates answer routing from retrieval planning.
+
+`router.py` decides the answer pipeline.
+
+`retrieval_planner.py` decides how to retrieve evidence.
+
+The retrieval planner uses universal query-shape rules instead of hardcoding behavior for specific sample questions.
+
+Current query shapes include:
+
+- `normal_qa`
+- `entity_lookup`
+- `yes_no_relationship`
+- `comparison`
+- `exact_phrase`
+- `section_summary`
+- `overview`
+- `troubleshooting`
+- `code_explanation`
+
+This means InfraRAG can handle new documents and new domains without adding one-off rules for every question.
+
+---
+
+### 3. Hybrid FTS5 + Qdrant Retrieval
+
+InfraRAG now supports hybrid retrieval.
+
+Retrieval can use:
+
+- Qdrant vector search
+- SQLite FTS5 keyword search
+- both together
+- optional neighbour chunk expansion
+- optional reranking
+
+The system chooses retrieval behavior based on query shape.
+
+Examples:
+
+| Query shape | Retrieval behavior |
+|---|---|
+| `entity_lookup` | Keyword-first hybrid retrieval |
+| `yes_no_relationship` | Keyword-first hybrid retrieval |
+| `exact_phrase` | FTS5 phrase search, vector disabled |
+| `comparison` | Balanced multi-entity hybrid retrieval |
+| `troubleshooting` | Keyword-first hybrid search with nearby chunks |
+| `code_explanation` | Keyword-first hybrid search for filenames/symbols/code chunks |
+| `normal_qa` | Vector + reranker by default in Deep AI |
+
+This improves retrieval quality because exact terms such as `CI/CD`, `Terraform`, error codes, filenames, symbols, and named entities are not left only to vector similarity.
+
+---
+
+### 4. Deep AI, Quick AI, and Direct Modes
+
+The main UI now supports three answer modes.
+
+| Mode | Purpose | Typical behavior |
+|---|---|---|
+| Deep AI | Best quality/speed balance | More context, hybrid retrieval, reranker ON, Ollama answer |
+| Quick AI | Faster answer | Smaller retrieval, shorter context, reranker OFF, Ollama answer |
+| Direct | Fastest lookup | No Ollama for simple lookups, returns evidence snippet directly |
+
+Current standard defaults:
+
+| Mode | Chunk limit | Context chars | Answer tokens | Graph chunks |
+|---|---:|---:|---:|---:|
+| Deep AI | 6 | 7000 | 350 | 3 |
+| Quick AI | 3 | 3500 | 180 | 2 |
+| Direct | 3 | 1200 | 0 | 2 |
+
+Direct mode is designed for quick source-backed evidence lookup, not polished long-form answers.
+
+---
+
+### 5. Runtime Performance Tuning Dashboard
+
+The Chat UI now includes a performance tuning dashboard.
+
+The dashboard lets the user adjust these values before asking a question:
+
+- chunk limit
+- context characters
+- answer token budget
+- graph chunks
+
+The dashboard is useful for testing quality vs latency.
+
+Example:
+
+```text
+Deep AI standard:
+chunks = 6
+context chars = 7000
+answer tokens = 350
+graph chunks = 3
+```
+
+The tuning applies to the next questions sent with those UI values. It does not permanently change the source code unless the defaults are also changed in backend code.
+
+---
+
+### 6. Per-Answer Tuning Metadata
+
+Each answer now shows the tuning values that produced it.
+
+The answer metadata includes:
+
+- chunk limit
+- context chars
+- answer tokens
+- graph chunks
+
+This makes answer comparison easier.
+
+Example display:
+
+```text
+Chunk limit: 6
+Context chars: 7000
+Answer tokens: 350
+Graph chunks: 3
+```
+
+This is shown beside timing details so users can compare speed and quality between runs.
+
+---
+
+### 7. Timing Breakdown per Answer
+
+Each answer now has a timing breakdown.
+
+The UI can show:
+
+- planning time
+- retrieval time
+- graph expansion time
+- context build time
+- time to first token
+- Ollama generation time
+- audit save time
+- total latency
+
+Example:
+
+```text
+Planning: 13ms
+Retrieval: 1.1s
+Graph: 0ms
+Context: 0ms
+First token: 1.2s
+Ollama: 13s
+Audit save: 16ms
+Total: 14s
+```
+
+This makes it clear where the bottleneck is. In current local runs, Ollama generation is usually the slowest part.
+
+---
+
+### 8. Backend-Enforced Runtime Defaults
+
+InfraRAG now has backend defaults for normal Q&A runtime tuning.
+
+If the frontend does not send tuning parameters, the backend still applies safe defaults:
+
+```text
+Deep AI:
+chunk limit = 6
+context chars = 7000
+answer tokens = 350
+graph chunks = 3
+
+Quick AI:
+chunk limit = 3
+context chars = 3500
+answer tokens = 180
+graph chunks = 2
+
+Direct:
+chunk limit = 3
+context chars = 1200
+answer tokens = 0
+graph chunks = 2
+```
+
+This prevents the frontend from being the only source of truth.
+
+The backend clamps runtime values to safe limits:
+
+```text
+chunk limit: 1 to 16
+context chars: 1000 to 30000
+answer tokens: 0 to 2000
+graph chunks: 0 to 8
+```
+
+---
+
+### 9. Yes/No Relationship Query Shape
+
+InfraRAG now detects yes/no relationship questions without calling the LLM planner.
+
+Examples:
+
+```text
+Is CI/CD part of DevOps?
+Is Terraform an IaC tool?
+Is Kubernetes used for orchestration?
+Can Prometheus monitor services?
+Does this document mention GitHub Actions?
+```
+
+These questions route to normal Q&A using rules-first logic, and retrieval uses keyword-first hybrid search.
+
+This improves questions that ask whether one concept belongs to or relates to another concept.
+
+---
+
+### 10. Graph Context Decoupled from Base Retrieval
+
+Graph context expansion is now separated from base retrieval timing.
+
+The flow is:
+
+```text
+base retrieval first
+→ optional graph expansion after retrieval
+→ separate graph_ms timing
+```
+
+This makes the timing dashboard more accurate:
+
+- retrieval time shows core FTS5/Qdrant/reranker retrieval
+- graph time shows only graph context expansion
+
+Graph context remains optional and defaults OFF for speed.
+
+---
+
+### 11. RAG Orchestrator
 
 A central RAG orchestrator controls the main answer flow.
 
@@ -224,7 +488,7 @@ This keeps the backend cleaner and makes new pipelines easier to add.
 
 ---
 
-### 3. Prompt Library
+### 12. Prompt Library
 
 Prompts are separated into a dedicated prompt library.
 
@@ -241,11 +505,11 @@ This controls:
 - verifier behavior
 - formatting rules
 
-The prompt library now includes stricter evidence rules so the model does not falsely say "No evidence found" when citations exist.
+The prompt library includes stricter evidence rules so the model does not falsely say `No evidence found` when citations exist.
 
 ---
 
-### 4. Multiple Answer Pipelines
+### 13. Multiple Answer Pipelines
 
 InfraRAG supports multiple answer pipelines instead of one generic RAG flow.
 
@@ -261,7 +525,7 @@ This is better than forcing every question through the same prompt.
 
 ---
 
-### 5. Streaming Answer UI
+### 14. Streaming Answer UI
 
 The main UI supports streaming answers from `/api/ask-stream`.
 
@@ -271,7 +535,7 @@ Some fallback paths, such as verifier correction or recovery, may still appear a
 
 ---
 
-### 6. Latency Timer and Progress Bar
+### 15. Latency Timer and Progress Bar
 
 The UI includes:
 
@@ -285,7 +549,7 @@ This helps show whether the request is routing, retrieving, generating, verifyin
 
 ---
 
-### 7. Local BGE Reranker
+### 16. Local BGE Reranker
 
 InfraRAG has a local reranker layer.
 
@@ -299,7 +563,7 @@ This improves answer quality because the LLM receives stronger context.
 
 ---
 
-### 8. Clickable Citations
+### 17. Clickable Citations
 
 Answers support clickable citations.
 
@@ -316,7 +580,7 @@ This is important because private RAG must prove where the answer came from.
 
 ---
 
-### 9. Chat History Support
+### 18. Chat History Support
 
 InfraRAG has chat history support.
 
@@ -332,7 +596,7 @@ This moves the app closer to a ChatGPT-style private assistant.
 
 ---
 
-### 10. SQLite Persistence
+### 19. SQLite Persistence
 
 InfraRAG uses SQLite for persistent metadata and history.
 
@@ -352,7 +616,7 @@ The database is stored under the backend data volume.
 
 ---
 
-### 11. Audit Logging
+### 20. Audit Logging
 
 InfraRAG includes an audit layer.
 
@@ -368,12 +632,14 @@ The audit trail captures:
 - latency
 - verifier result
 - graph context status where available
+- runtime tuning values where available
+- detailed timing breakdown where available
 
 This is useful for enterprise-style traceability.
 
 ---
 
-### 12. Answer Verifier and Recovery Layer
+### 21. Answer Verifier and Recovery Layer
 
 InfraRAG includes an answer verifier.
 
@@ -388,13 +654,13 @@ retrieval found citations
 → citations are preserved if useful evidence exists
 ```
 
-This reduces false "No evidence found" answers.
+This reduces false `No evidence found` answers.
 
 Normal Q&A usually skips verifier for speed, but denial verification/recovery can run when the model denies evidence despite having citations.
 
 ---
 
-### 13. Admin UI
+### 22. Admin UI
 
 The Admin UI is styled to match the main InfraRAG UI.
 
@@ -422,9 +688,9 @@ It supports:
 
 ---
 
-### 14. Graph UI and Knowledge Graph
+### 23. Graph UI and Knowledge Graph
 
-InfraRAG now includes a Graph UI as a third main page beside Chat and Admin.
+InfraRAG includes a Graph UI as a third main page beside Chat and Admin.
 
 Main pages:
 
@@ -465,11 +731,11 @@ The Graph UI includes:
 - citation opening
 - source-scoped graph views
 
-Current graph behavior is mainly for observability, trust, debugging, and knowledge-base inspection. Graph-assisted retrieval exists as an optional context expansion path, but the system is still primarily vector RAG.
+Current graph behavior is mainly for observability, trust, debugging, and knowledge-base inspection. Graph-assisted retrieval exists as an optional context expansion path, but the system is still primarily vector/hybrid RAG.
 
 ---
 
-### 15. Automatic Graph Build on Ingest
+### 24. Automatic Graph Build on Ingest
 
 InfraRAG builds graph data during ingestion for normal-sized sources.
 
@@ -500,9 +766,9 @@ Duplicate uploads are also handled better. If a duplicate upload is detected, In
 
 ---
 
-### 16. DOCX Ingestion
+### 25. DOCX Ingestion
 
-InfraRAG now supports Word `.docx` ingestion.
+InfraRAG supports Word `.docx` ingestion.
 
 DOCX files can be uploaded from the main UI and ingested into:
 
@@ -517,9 +783,9 @@ Legacy `.doc` files are not currently supported unless converted to `.docx`, `.p
 
 ---
 
-### 17. Duplicate Upload Handling
+### 26. Duplicate Upload Handling
 
-Upload handling now detects duplicate files by hash.
+Upload handling detects duplicate files by hash.
 
 Expected behavior:
 
@@ -537,7 +803,7 @@ The ingestion job layer also tries to prevent duplicate active jobs for the same
 
 ---
 
-### 18. Cancellation Support
+### 27. Cancellation Support
 
 The UI supports cancelling active answer generation and ingestion jobs.
 
@@ -557,7 +823,7 @@ Cancellation is useful for:
 
 ---
 
-### 19. Prometheus and Grafana Observability
+### 28. Prometheus and Grafana Observability
 
 InfraRAG includes observability for both infrastructure/API health and RAG behavior.
 
@@ -585,9 +851,9 @@ This makes the app easier to demonstrate as a production-style AI/DevOps system.
 
 ---
 
-### 20. Async Ingestion Jobs and Large File Support
+### 29. Async Ingestion Jobs and Large File Support
 
-InfraRAG now supports background ingestion jobs.
+InfraRAG supports background ingestion jobs.
 
 Previously, file upload and ingestion happened inside the same HTTP request:
 
@@ -618,7 +884,7 @@ upload file
 
 This means the app can accept a large file upload without blocking Chat/Admin while indexing continues in the background.
 
-InfraRAG now tracks ingestion jobs in SQLite through the `ingestion_jobs` table.
+InfraRAG tracks ingestion jobs in SQLite through the `ingestion_jobs` table.
 
 Job states include:
 
@@ -628,7 +894,7 @@ Job states include:
 - `failed`
 - `cancelled`
 
-Large `.txt` files now use adaptive chunking.
+Large `.txt` files use adaptive chunking.
 
 Current large text rule:
 
@@ -656,9 +922,9 @@ Large-file vector ingestion is prioritised first. Graph build is treated as an e
 
 ---
 
-### 21. Ingestion Progress, Cancel, Retry, and Build Graph Controls
+### 30. Ingestion Progress, Cancel, Retry, and Build Graph Controls
 
-The Admin UI now includes ingestion job controls.
+The Admin UI includes ingestion job controls.
 
 New Admin UI controls:
 
@@ -685,7 +951,7 @@ Stage: embedding:bible.txt
 Progress: 340 / 967
 ```
 
-The backend now saves ingestion progress fields:
+The backend saves ingestion progress fields:
 
 - `stage`
 - `total_units`
@@ -693,7 +959,7 @@ The backend now saves ingestion progress fields:
 - `progress_percent`
 - `heartbeat_at`
 
-The main Chat upload panel was also changed so it no longer says "Upload complete" immediately. Upload completion and indexing completion are now separated.
+The main Chat upload panel no longer says `Upload complete` immediately. Upload completion and indexing completion are separated.
 
 Correct behavior:
 
@@ -756,13 +1022,19 @@ Rules-First Intent Router
   v
 Streaming RAG Orchestrator
   |
+  +--> Universal Adaptive Retrieval Planner
+  |
+  +--> SQLite FTS5 Keyword Search
+  |
   +--> Query Embedding using Ollama / nomic-embed-text
   |
   +--> Qdrant Candidate Retrieval
   |
-  +--> BGE Reranking
+  +--> Optional BGE Reranking
   |
   +--> Optional Graph Context Expansion
+  |
+  +--> Context Compacting
   |
   +--> Prompt Library
   |
@@ -775,7 +1047,7 @@ Streaming RAG Orchestrator
   +--> SQLite Audit Log
   |
   v
-Frontend Answer with Metadata, Latency, Progress, and Citations
+Frontend Answer with Metadata, Tuning Values, Timing, Progress, and Citations
 ```
 
 ---
@@ -792,42 +1064,54 @@ Check if follow-up
 Resolve standalone question if needed
   |
   v
-Choose pipeline
+Choose answer pipeline
   |
   +--> rules_first when obvious
   |
   +--> llm_planner fallback when ambiguous
   |
   v
-Retrieve candidate chunks from Qdrant
+Choose retrieval plan
+  |
+  +--> query shape
+  |
+  +--> retrieval mode
+  |
+  +--> keyword/vector/reranker/neighbour settings
   |
   v
-Rerank chunks with BGE
+Retrieve candidate chunks from FTS5 and/or Qdrant
   |
   v
-Compact context
+Rerank chunks with BGE where enabled
+  |
+  v
+Optionally expand with graph context
+  |
+  v
+Compact context using runtime tuning limit
   |
   v
 Build pipeline-specific prompt
   |
   v
-Stream answer from Ollama
+Stream answer from Ollama or return Direct snippet
   |
   v
 Optionally verify/recover
   |
   v
-Save chat + audit
+Save chat + audit + timing metadata
   |
   v
-Show answer + citations
+Show answer + citations + timing + tuning values
 ```
 
 ---
 
 ## Ingestion Flow
 
-InfraRAG now uses asynchronous background ingestion.
+InfraRAG uses asynchronous background ingestion.
 
 ```text
 Files / Folders / Uploads / PDFs / DOCX / Repos
@@ -915,7 +1199,7 @@ Graph API
 Graph UI with Cytoscape.js
 ```
 
-For large files, graph build can be deferred so vector RAG is available first. The Admin UI can trigger `Build Graph` later for a selected source.
+For large files, graph build can be deferred so vector/hybrid RAG is available first. The Admin UI can trigger `Build Graph` later for a selected source.
 
 ---
 
@@ -932,6 +1216,10 @@ infrarag/
 │   └── app/
 │       ├── main.py
 │       ├── router.py
+│       ├── retrieval_planner.py
+│       ├── hybrid_retrieve.py
+│       ├── keyword_index.py
+│       ├── source_profile.py
 │       ├── rag_orchestrator.py
 │       ├── streaming_orchestrator.py
 │       ├── prompts.py
@@ -994,21 +1282,25 @@ infrarag/
 
 | File | Purpose |
 |---|---|
-| `main.py` | FastAPI entrypoint and API routes |
+| `main.py` | FastAPI entrypoint and API routes, including runtime tuning query parameters for streaming answers |
 | `router.py` | Rules-first router that decides which answer pipeline to use |
+| `retrieval_planner.py` | Universal retrieval planner that decides query shape and retrieval mode |
+| `hybrid_retrieve.py` | Executes FTS5, Qdrant, hybrid retrieval, clustering, neighbour expansion, and reranking |
+| `keyword_index.py` | SQLite FTS5 keyword search helper |
+| `source_profile.py` | Source profiling helper used by adaptive retrieval |
 | `query_planner.py` | Optional LLM planner fallback for ambiguous questions |
-| `followup_resolver.py` | Resolves vague follow-ups such as "elaborate the above" |
+| `followup_resolver.py` | Resolves vague follow-ups such as `elaborate the above` |
 | `rag_orchestrator.py` | Non-streaming RAG answer controller |
-| `streaming_orchestrator.py` | Main streaming answer controller used by the UI |
+| `streaming_orchestrator.py` | Main streaming answer controller used by the UI, including timings and tuning metadata |
 | `prompts.py` | Central prompt library |
-| `retrieve.py` | Vector retrieval, clustering, reranking, and graph context expansion |
+| `retrieve.py` | Main retrieval entrypoint that calls adaptive retrieval and optional graph expansion |
 | `reranker.py` | Local BGE reranking |
 | `context_utils.py` | Builds compact context and citations |
 | `response_formatter.py` | Formats no-evidence and response objects |
 | `answer_verifier.py` | Verifies and repairs unsupported or false-denial answers |
 | `audit.py` | Saves audit events |
 | `chat_history.py` | Conversation and message handling |
-| `metadata_db.py` | SQLite metadata, files, ingestion jobs, chunks, audit, and history storage |
+| `metadata_db.py` | SQLite metadata, files, ingestion jobs, chunks, audit, graph, and history storage |
 | `qdrant_client.py` | Qdrant wrapper |
 | `embedding_service.py` | Embedding generation |
 | `uploads.py` | File and folder upload support |
@@ -1147,6 +1439,13 @@ Use this only if those files exist inside your mounted `docs/` corpus.
 | `GET /retrieve?q=...` | Retrieve chunks only |
 | `GET /ask?q=...` | Non-streaming RAG answer flow |
 | `GET /ask-stream?q=...` | Streaming RAG answer flow |
+| `GET /ask-stream?q=...&retrieval_speed=normal` | Deep AI streaming answer |
+| `GET /ask-stream?q=...&retrieval_speed=fast` | Quick AI streaming answer |
+| `GET /ask-stream?q=...&retrieval_speed=direct` | Direct snippet/evidence answer where supported |
+| `GET /ask-stream?...&retrieval_limit_override=6` | Runtime chunk limit override |
+| `GET /ask-stream?...&max_context_chars=7000` | Runtime context character override |
+| `GET /ask-stream?...&num_predict_override=350` | Runtime answer token budget override |
+| `GET /ask-stream?...&graph_max_chunks=3` | Runtime graph chunk override |
 | `POST /cancel` | Cancel active answer-generation request |
 | `POST /upload` | Upload one file and create background ingestion job |
 | `POST /upload-folder` | Upload folder and create background ingestion job |
@@ -1220,7 +1519,7 @@ Used for:
 
 ## Key Runtime Parameters
 
-Important parameters are configured through `docker-compose.yml` environment variables and backend defaults.
+Important parameters are configured through `docker-compose.yml` environment variables, backend defaults, and optional per-request tuning from the UI.
 
 | Parameter | Purpose |
 |---|---|
@@ -1231,8 +1530,8 @@ Important parameters are configured through `docker-compose.yml` environment var
 | `PLANNER_NUM_PREDICT` | Planner output token budget |
 | `FOLLOWUP_RESOLVER_ENABLED` | Enables follow-up resolver |
 | `FOLLOWUP_RESOLVER_TIMEOUT_SECONDS` | Max follow-up resolver wait |
-| `NORMAL_QA_LIMIT` | Final chunks for normal Q&A |
-| `NORMAL_QA_NUM_PREDICT` | Normal Q&A answer token budget |
+| `NORMAL_QA_LIMIT` | Base final chunks for normal Q&A |
+| `NORMAL_QA_NUM_PREDICT` | Base normal Q&A answer token budget |
 | `LONG_EXPLANATION_LIMIT` | Final chunks for long explanation |
 | `LONG_EXPLANATION_NUM_PREDICT` | Long explanation token budget |
 | `REPO_EXPLANATION_LIMIT` | Final chunks for repo explanation |
@@ -1250,12 +1549,25 @@ Important parameters are configured through `docker-compose.yml` environment var
 | `MIN_SCORE_THRESHOLD` | Minimum retrieval confidence threshold |
 | `MAX_CONTEXT_CHARS_PER_CHUNK` | Per-chunk context cap |
 | `MAX_TOTAL_CONTEXT_CHARS` | Total context cap |
+| `retrieval_speed` | Per-request mode: `normal`, `fast`, or `direct` |
+| `retrieval_limit_override` | Per-request chunk limit override for normal Q&A |
+| `max_context_chars` | Per-request total context character budget |
+| `num_predict_override` | Per-request answer token budget override for normal Q&A |
+| `graph_max_chunks` | Per-request graph expansion chunk budget |
 | `MAX_INGEST_WORKERS` | Number of background ingestion workers, default `1` |
 | `LARGE_TEXT_THRESHOLD_BYTES` | File size threshold for large `.txt` adaptive chunking, default `1000000` |
 | `LARGE_TEXT_CHUNK_SIZE` | Large `.txt` chunk size, default `5000` characters |
 | `LARGE_TEXT_CHUNK_OVERLAP` | Large `.txt` chunk overlap, default `500` characters |
 | `QDRANT_UPSERT_BATCH_SIZE` | Number of vectors written to Qdrant per batch, default `100` |
 | `GRAPH_BUILD_MAX_CHUNKS_INLINE` | Max chunks allowed for inline graph build, default `500` |
+
+### Current Answer Mode Defaults
+
+| Mode | Backend mode value | Chunk limit | Context chars | Answer tokens | Graph chunks | Reranker |
+|---|---|---:|---:|---:|---:|---|
+| Deep AI | `normal` | 6 | 7000 | 350 | 3 | ON |
+| Quick AI | `fast` | 3 | 3500 | 180 | 2 | Usually OFF |
+| Direct | `direct` | 3 | 1200 | 0 | 2 | OFF |
 
 ---
 
@@ -1332,7 +1644,7 @@ bible.txt
 
 ## Storage Model
 
-InfraRAG separates raw files, vector data, metadata, graph data, and runtime logs.
+InfraRAG separates raw files, vector data, keyword index data, metadata, graph data, and runtime logs.
 
 | Storage | Purpose |
 |---|---|
@@ -1340,6 +1652,7 @@ InfraRAG separates raw files, vector data, metadata, graph data, and runtime log
 | `/app/data/uploads` | Uploaded files inside backend data volume |
 | `/app/data/repos` | Cloned Git repositories |
 | Qdrant | Vector embeddings and searchable chunks |
+| SQLite FTS5 | Keyword search index for exact terms, filenames, symbols, and entities |
 | SQLite | Source records, ingestion jobs, progress status, chunk metadata, chat history, audit logs, graph data |
 | Docker volumes | Persistent container data |
 | Prometheus volume/config | Metrics scraping |
@@ -1398,6 +1711,9 @@ After ingestion, you can ask:
 
 ### DevOps, Cloud, and Runbook Questions
 
+- What is DevOps?
+- Is CI/CD part of DevOps?
+- Is Terraform an IaC tool?
 - What are the main steps in this runbook?
 - What caused this incident according to the runbook?
 - What should I check first for this error?
@@ -1413,6 +1729,13 @@ After ingestion, you can ask:
 - Explain the main theme of this document.
 - Elaborate the previous answer.
 - Explain point 2 in detail.
+
+### Performance Testing Questions
+
+- Ask the same question in Deep AI and Quick AI and compare latency.
+- Turn Graph Context ON and compare answer quality.
+- Increase context chars and check whether quality improves.
+- Lower answer tokens and check whether response becomes too short.
 
 ---
 
@@ -1478,11 +1801,21 @@ InfraRAG now demonstrates:
 - local LLM inference with Ollama
 - local embeddings
 - Qdrant vector search
+- SQLite FTS5 keyword search
+- hybrid keyword + vector retrieval
+- universal adaptive retrieval planning
+- query-shape detection
+- yes/no relationship detection
 - local BGE reranking
 - rules-first intent routing
 - optional LLM planner fallback
 - multiple answer pipelines
 - prompt library separation
+- Deep AI, Quick AI, and Direct modes
+- runtime performance tuning dashboard
+- per-answer tuning metadata
+- detailed timing breakdown per answer
+- backend-enforced runtime defaults
 - streaming answer generation
 - request cancellation
 - answer verification
@@ -1534,6 +1867,8 @@ Current limitations:
 - graph build for very large sources should become a separate background graph job
 - ingestion progress exists, but deeper per-file/per-stage telemetry can still improve
 - some secondary LLM paths such as verifier/recovery may still appear after the first streamed draft
+- local Ollama generation latency is still the main bottleneck
+- Quick AI can be too short for some questions if answer token budget is too low
 - answer quality gates need more formal tests
 - graph-assisted retrieval is still early and optional
 - graph is currently mostly for observability/debugging, not the primary retrieval engine
@@ -1548,29 +1883,34 @@ Recommended next improvements:
 
 1. Add authentication and user login
 2. Add role-based access control
-3. Add proper HTTPS/TLS
-4. Add backup and restore for Qdrant and SQLite
-5. Add stronger CI/CD tests
-6. Add Docker Compose smoke tests in GitHub Actions
-7. Add regression tests for known questions and expected citations
-8. Add answer-quality gates for too-short long explanations
-9. Add story/book neighboring-chunk retrieval
-10. Add better Graph-RAG retrieval using graph relationships
-11. Replace in-process ingestion worker with a stronger persistent queue such as Celery, RQ, Dramatiq, or Arq
-12. Add source deletion/rebuild from Admin UI
-13. Add model and retrieval evaluation tests
-14. Add confidence thresholds for `No evidence found`
-15. Add source-level access permissions
-16. Add deployment guide for VM or cloud server
-17. Add production secrets handling
-18. Add OCR support for scanned PDFs
-19. Add PowerPoint and Excel ingestion
-20. Add admin page for re-indexing, graph rebuilds, and corpus health
-21. Add dedicated background graph build jobs
-22. Add uploaded raw-file cleanup controls
-23. Add ingestion job history cleanup
-24. Add ingestion regression tests for large files such as books/manuals
-25. Add source table columns for Vector Status and Graph Status
+3. Add source-level permissions and access filters visibly in the UI
+4. Add proper HTTPS/TLS
+5. Add backup and restore for Qdrant and SQLite
+6. Add stronger CI/CD tests
+7. Add Docker Compose smoke tests in GitHub Actions
+8. Add regression tests for known questions and expected citations
+9. Add answer-quality gates for too-short Quick AI and long explanations
+10. Add source-type preference logic so concept questions prefer docs over CV/profile sources unless a CV/profile is selected
+11. Add story/book neighboring-chunk retrieval improvements
+12. Add better Graph-RAG retrieval using graph relationships
+13. Replace in-process ingestion worker with a stronger persistent queue such as Celery, RQ, Dramatiq, or Arq
+14. Add source deletion/rebuild from Admin UI
+15. Add model and retrieval evaluation tests
+16. Add confidence thresholds for `No evidence found`
+17. Add deployment guide for VM or cloud server
+18. Add production secrets handling
+19. Add OCR support for scanned PDFs
+20. Add PowerPoint and Excel ingestion
+21. Add admin page for re-indexing, graph rebuilds, and corpus health
+22. Add dedicated background graph build jobs
+23. Add uploaded raw-file cleanup controls
+24. Add ingestion job history cleanup
+25. Add ingestion regression tests for large files such as books/manuals
+26. Add source table columns for Vector Status and Graph Status
+27. Add model performance comparison dashboard for local Ollama models
+28. Add per-pipeline latency budget alerts
+29. Add configurable default tuning profiles from Admin UI
+30. Add production deployment hardening for multi-user environments
 
 ---
 
@@ -1599,6 +1939,8 @@ It brings together:
 - local LLM operations
 - retrieval-augmented generation
 - vector databases
+- keyword search
+- hybrid retrieval
 - reranking
 - knowledge graphs
 - observability
