@@ -51,12 +51,33 @@ from app.summary_jobs import start_document_summary_job
 
 MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "0.35"))
 
+NORMAL_QA_RUNTIME_DEFAULTS = {
+    "normal": {
+        "retrieval_limit": 6,
+        "max_context_chars": 7000,
+        "num_predict": 350,
+        "graph_max_chunks": 3,
+    },
+    "fast": {
+        "retrieval_limit": 3,
+        "max_context_chars": 3500,
+        "num_predict": 180,
+        "graph_max_chunks": 2,
+    },
+    "direct": {
+        "retrieval_limit": 3,
+        "max_context_chars": 1200,
+        "num_predict": 0,
+        "graph_max_chunks": 2,
+    },
+}
+
 NORMAL_QA_LIMIT = int(os.getenv("NORMAL_QA_LIMIT", "6"))
 LONG_EXPLANATION_LIMIT = int(os.getenv("LONG_EXPLANATION_LIMIT", "10"))
 REPO_EXPLANATION_LIMIT = int(os.getenv("REPO_EXPLANATION_LIMIT", "10"))
 INCIDENT_RUNBOOK_LIMIT = int(os.getenv("INCIDENT_RUNBOOK_LIMIT", "8"))
 
-NORMAL_QA_NUM_PREDICT = int(os.getenv("NORMAL_QA_NUM_PREDICT", "500"))
+NORMAL_QA_NUM_PREDICT = int(os.getenv("NORMAL_QA_NUM_PREDICT", "350"))
 LONG_EXPLANATION_NUM_PREDICT = int(os.getenv("LONG_EXPLANATION_NUM_PREDICT", "1400"))
 REPO_EXPLANATION_NUM_PREDICT = int(os.getenv("REPO_EXPLANATION_NUM_PREDICT", "1400"))
 CODE_FILE_NUM_PREDICT = int(os.getenv("CODE_FILE_NUM_PREDICT", "900"))
@@ -577,6 +598,24 @@ def _elapsed_ms(started_at: float) -> int:
     return int((time.perf_counter() - started_at) * 1000)
 
 
+def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+
+    return max(minimum, min(maximum, number))
+
+
+def _normal_qa_runtime_defaults(retrieval_speed: str) -> dict[str, int]:
+    clean = str(retrieval_speed or "normal").lower()
+    if clean == "direct":
+        return dict(NORMAL_QA_RUNTIME_DEFAULTS["direct"])
+    if clean == "fast":
+        return dict(NORMAL_QA_RUNTIME_DEFAULTS["fast"])
+    return dict(NORMAL_QA_RUNTIME_DEFAULTS["normal"])
+
+
 def _new_timing_breakdown() -> dict[str, int | None]:
     return {
         "planning_ms": None,
@@ -608,6 +647,31 @@ def _timing_payload(timings: dict[str, int | None]) -> dict[str, int | None]:
     }
 
 
+def _runtime_tuning_payload(
+    *,
+    retrieval_limit: int,
+    max_context_chars: int,
+    num_predict: int,
+    graph_max_chunks: int,
+) -> dict[str, int]:
+    """
+    Emit both plain and tuning_* keys.
+
+    Plain keys are useful for API clients.
+    tuning_* keys are useful for the frontend runtime tuning dropdown.
+    """
+    return {
+        "retrieval_limit": retrieval_limit,
+        "max_context_chars": max_context_chars,
+        "num_predict": num_predict,
+        "graph_max_chunks": graph_max_chunks,
+        "tuning_retrieval_limit": retrieval_limit,
+        "tuning_max_context_chars": max_context_chars,
+        "tuning_num_predict": num_predict,
+        "tuning_graph_max_chunks": graph_max_chunks,
+    }
+
+
 def stream_ask_events(
     question: str,
     conversation_id: str | None = None,
@@ -620,6 +684,10 @@ def stream_ask_events(
     request_id: str | None = None,
     use_graph_context: bool = False,
     retrieval_speed: str = "normal",
+    retrieval_limit_override: int | None = None,
+    max_context_chars: int | None = None,
+    num_predict_override: int | None = None,
+    graph_max_chunks: int | None = None,
 ) -> Iterator[str]:
     started = time.perf_counter()
     timings = _new_timing_breakdown()
@@ -775,11 +843,45 @@ def stream_ask_events(
 
         retrieval_limit, num_predict = _pipeline_limits(pipeline_used)
 
-        if clean_retrieval_speed == "fast":
+        # Backend source-of-truth defaults for normal Q&A.
+        # Frontend dashboard values can override these per request, but if the
+        # frontend sends nothing, these stable backend defaults still apply.
+        effective_context_chars = 11000
+        if pipeline_used == "normal_qa" and not exact_file_mode:
+            runtime_defaults = _normal_qa_runtime_defaults(clean_retrieval_speed)
+
+            retrieval_limit = _clamp_int(
+                retrieval_limit_override,
+                runtime_defaults["retrieval_limit"],
+                1,
+                16,
+            )
+            effective_context_chars = _clamp_int(
+                max_context_chars,
+                runtime_defaults["max_context_chars"],
+                1000,
+                30000,
+            )
+            num_predict = _clamp_int(
+                num_predict_override,
+                runtime_defaults["num_predict"],
+                0,
+                2000,
+            )
+            effective_graph_max_chunks = _clamp_int(
+                graph_max_chunks,
+                runtime_defaults["graph_max_chunks"],
+                0,
+                8,
+            )
+        else:
+            effective_graph_max_chunks = _clamp_int(graph_max_chunks, 3, 0, 8)
+
+        # Legacy speed clamps for non-normal pipelines only.
+        # Normal Q&A is controlled by the official runtime defaults above.
+        if clean_retrieval_speed == "fast" and pipeline_used != "normal_qa":
             retrieval_limit = min(retrieval_limit, 3)
-            if pipeline_used == "normal_qa":
-                num_predict = min(num_predict, 180)
-            elif pipeline_used == "incident_runbook":
+            if pipeline_used == "incident_runbook":
                 num_predict = min(num_predict, 450)
             elif pipeline_used == "repo_explanation":
                 num_predict = min(num_predict, 500)
@@ -787,7 +889,8 @@ def stream_ask_events(
                 num_predict = min(num_predict, 700)
 
         if clean_retrieval_speed == "direct":
-            retrieval_limit = min(retrieval_limit, 3)
+            if pipeline_used != "normal_qa":
+                retrieval_limit = min(retrieval_limit, 3)
             num_predict = 0
 
         # Exact file/code explanation should be smaller and faster than repo-wide explanation.
@@ -847,7 +950,7 @@ def stream_ask_events(
 
             chunks, graph_context_meta = expand_with_graph_context(
                 chunks,
-                max_graph_chunks=3,
+                max_graph_chunks=effective_graph_max_chunks,
             )
 
             timings["graph_ms"] = _elapsed_ms(graph_started)
@@ -999,7 +1102,7 @@ def stream_ask_events(
 
         compacted = compact_chunks(
             chunks,
-            max_total_chars=18000 if exact_file_mode else 11000,
+            max_total_chars=18000 if exact_file_mode else effective_context_chars,
         )
         citations = build_citations(compacted)
         context_text = build_context_text(compacted)
@@ -1038,6 +1141,12 @@ def stream_ask_events(
                     "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
                     "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
                     "retrieved_chunks": len(compacted),
+                    **_runtime_tuning_payload(
+                        retrieval_limit=retrieval_limit,
+                        max_context_chars=effective_context_chars,
+                        num_predict=num_predict,
+                        graph_max_chunks=effective_graph_max_chunks,
+                    ),
                     "graph_context_enabled": bool(use_graph_context and not exact_file_mode),
                     "graph_chunks_added": graph_chunks_added if not exact_file_mode else 0,
                     "graph_reason": graph_context_meta.get("graph_reason", ""),
@@ -1085,6 +1194,14 @@ def stream_ask_events(
                 resolved_file=resolved_file,
             )
             answer_metadata.update(_timing_payload(timings))
+            answer_metadata.update(
+                _runtime_tuning_payload(
+                    retrieval_limit=retrieval_limit,
+                    max_context_chars=effective_context_chars,
+                    num_predict=num_predict,
+                    graph_max_chunks=effective_graph_max_chunks,
+                )
+            )
 
             audit_save_started = time.perf_counter()
 
@@ -1137,6 +1254,12 @@ def stream_ask_events(
                     "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
                     "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
                     "retrieved_chunks": len(compacted),
+                    **_runtime_tuning_payload(
+                        retrieval_limit=retrieval_limit,
+                        max_context_chars=effective_context_chars,
+                        num_predict=num_predict,
+                        graph_max_chunks=effective_graph_max_chunks,
+                    ),
                     **_timing_payload(timings),
                 },
             )
@@ -1174,6 +1297,12 @@ def stream_ask_events(
                 "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
                 "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
                 "retrieved_chunks": len(compacted),
+                **_runtime_tuning_payload(
+                    retrieval_limit=retrieval_limit,
+                    max_context_chars=effective_context_chars,
+                    num_predict=num_predict,
+                    graph_max_chunks=effective_graph_max_chunks,
+                ),
                 "graph_context_enabled": bool(use_graph_context and not exact_file_mode),
                 "graph_chunks_added": graph_chunks_added if not exact_file_mode else 0,
                 "graph_reason": graph_context_meta.get("graph_reason", ""),
@@ -1548,6 +1677,12 @@ def stream_ask_events(
                 "resolved_source_id": resolved_file.get("source_id") if resolved_file else None,
                 "resolved_source_path": resolved_file.get("source_path") if resolved_file else None,
                 "retrieved_chunks": len(compacted),
+                    **_runtime_tuning_payload(
+                        retrieval_limit=retrieval_limit,
+                        max_context_chars=effective_context_chars,
+                        num_predict=num_predict,
+                        graph_max_chunks=effective_graph_max_chunks,
+                    ),
                 **_timing_payload(timings),
             },
         )

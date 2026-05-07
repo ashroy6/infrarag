@@ -323,6 +323,87 @@
       font-weight: 700;
     }
 
+    .tuning-panel {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #242424;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+
+    .tuning-panel.hidden {
+      display: none;
+    }
+
+    .tuning-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      color: #e5e7eb;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .tuning-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      align-items: end;
+    }
+
+    .tuning-field {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .tuning-field label {
+      color: #bdbdbd;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .tuning-field input {
+      width: 100%;
+      min-width: 0;
+      padding: 8px 9px;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: var(--panel);
+      color: var(--text);
+      font-size: 13px;
+    }
+
+    .tuning-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+
+    .tuning-note {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    @media (max-width: 900px) {
+      .tuning-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 600px) {
+      .tuning-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+
     .source-summary {
       color: var(--muted);
       font-size: 12px;
@@ -463,6 +544,20 @@
     .meta-grid strong {
       color: #bdbdbd;
       font-weight: 600;
+    }
+
+    .details-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: flex-start;
+      margin-top: 8px;
+    }
+
+    .details-row .timing-details {
+      flex: 1 1 360px;
+      min-width: 280px;
+      margin-top: 0;
     }
 
     .timing-details {
@@ -952,6 +1047,39 @@
             </label>
             <span class="source-summary">Direct is snippet-only. Quick AI is short RAG. Deep AI is deeper RAG. Graph default OFF for speed.</span>
           </div>
+
+          <div id="tuningPanel" class="tuning-panel">
+            <div class="tuning-title-row">
+              <span>Performance tuning dashboard</span>
+              <button class="secondary-btn" type="button" onclick="resetTuningSettings()">Reset standard values</button>
+            </div>
+
+            <div class="tuning-grid">
+              <div class="tuning-field">
+                <label for="tuneChunks">Chunks</label>
+                <input id="tuneChunks" type="number" min="1" max="16" step="1" />
+              </div>
+
+              <div class="tuning-field">
+                <label for="tuneContextChars">Context chars</label>
+                <input id="tuneContextChars" type="number" min="1000" max="30000" step="500" />
+              </div>
+
+              <div class="tuning-field">
+                <label for="tuneNumPredict">Answer tokens</label>
+                <input id="tuneNumPredict" type="number" min="0" max="2000" step="25" />
+              </div>
+
+              <div class="tuning-field">
+                <label for="tuneGraphChunks">Graph chunks</label>
+                <input id="tuneGraphChunks" type="number" min="0" max="8" step="1" />
+              </div>
+            </div>
+
+            <div id="tuningModeHint" class="tuning-note">
+              Deep AI standard: 6 chunks, 7000 context chars, 350 answer tokens.
+            </div>
+          </div>
         </div>
 
         <div id="uploadPanel" class="upload-panel">
@@ -1172,6 +1300,75 @@
       return "Deep AI";
     }
 
+
+    const DEFAULT_TUNING = {
+      normal: {
+        chunks: 6,
+        context_chars: 7000,
+        num_predict: 350,
+        graph_chunks: 3,
+        note: "Deep AI standard: best quality/speed balance. FTS5 + Qdrant + reranker ON."
+      },
+      fast: {
+        chunks: 3,
+        context_chars: 3500,
+        num_predict: 180,
+        graph_chunks: 2,
+        note: "Quick AI standard: faster answer, less context, reranker OFF."
+      },
+      direct: {
+        chunks: 3,
+        context_chars: 1200,
+        num_predict: 0,
+        graph_chunks: 2,
+        note: "Direct standard: no Ollama. Backend returns top evidence snippet only."
+      }
+    };
+
+    function getTuningDefaults() {
+      const speed = getRetrievalSpeed();
+      return DEFAULT_TUNING[speed] || DEFAULT_TUNING.normal;
+    }
+
+    function numberFromInput(id, fallback, min, max) {
+      const el = document.getElementById(id);
+      const value = Number(el ? el.value : fallback);
+      if (!Number.isFinite(value)) return fallback;
+      return Math.max(min, Math.min(max, Math.round(value)));
+    }
+
+    function getTuningSettings() {
+      const defaults = getTuningDefaults();
+
+      return {
+        chunks: numberFromInput("tuneChunks", defaults.chunks, 1, 16),
+        context_chars: numberFromInput("tuneContextChars", defaults.context_chars, 1000, 30000),
+        num_predict: numberFromInput("tuneNumPredict", defaults.num_predict, 0, 2000),
+        graph_chunks: numberFromInput("tuneGraphChunks", defaults.graph_chunks, 0, 8),
+      };
+    }
+
+    function applyTuningDefaultsForCurrentMode() {
+      const defaults = getTuningDefaults();
+
+      const chunks = document.getElementById("tuneChunks");
+      const contextChars = document.getElementById("tuneContextChars");
+      const numPredict = document.getElementById("tuneNumPredict");
+      const graphChunks = document.getElementById("tuneGraphChunks");
+      const hint = document.getElementById("tuningModeHint");
+
+      if (chunks) chunks.value = defaults.chunks;
+      if (contextChars) contextChars.value = defaults.context_chars;
+      if (numPredict) numPredict.value = defaults.num_predict;
+      if (graphChunks) graphChunks.value = defaults.graph_chunks;
+      if (hint) hint.textContent = defaults.note;
+    }
+
+    function resetTuningSettings() {
+      applyTuningDefaultsForCurrentMode();
+      persistChatState();
+    }
+
     function metadataHasRuntimeDetails(meta) {
       if (!meta || typeof meta !== "object") return false;
 
@@ -1216,7 +1413,18 @@
       }
 
       document.querySelectorAll('input[name="retrievalSpeed"]').forEach(input => {
-        input.addEventListener("change", persistChatState);
+        input.addEventListener("change", () => {
+          applyTuningDefaultsForCurrentMode();
+          persistChatState();
+        });
+      });
+
+      ["tuneChunks", "tuneContextChars", "tuneNumPredict", "tuneGraphChunks"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+          el.addEventListener("change", persistChatState);
+          el.addEventListener("input", persistChatState);
+        }
       });
 
       window.addEventListener("beforeunload", () => {
@@ -1456,7 +1664,7 @@
                   `}
                 </div>
                 ${hasRuntimeMeta ? `<div style="margin-top:6px;"><strong>Reason:</strong> ${escapeHtml(meta.intent_reason || "n/a")}</div>` : ""}
-                ${renderTimingDetails(meta)}
+                ${renderRuntimeDetailsRow(meta)}
               </div>
               <div class="mini-progress">
                 <div class="mini-progress-row">
@@ -1795,6 +2003,71 @@
       ].some(key => meta[key] !== undefined && meta[key] !== null && meta[key] !== "");
     }
 
+    function renderRuntimeDetailsRow(meta) {
+      const timingHtml = renderTimingDetails(meta);
+      const tuningHtml = renderTuningDetails(meta);
+
+      if (!timingHtml && !tuningHtml) return "";
+
+      return `
+        <div class="details-row">
+          ${timingHtml}
+          ${tuningHtml}
+        </div>
+      `;
+    }
+
+    function hasTuningDetails(meta) {
+      if (!meta || typeof meta !== "object") return false;
+
+      return [
+        "tuning_retrieval_limit",
+        "tuning_context_chars",
+        "tuning_num_predict",
+        "tuning_graph_chunks",
+        "max_context_chars",
+        "num_predict_override",
+        "graph_max_chunks",
+      ].some(key => meta[key] !== undefined && meta[key] !== null && meta[key] !== "");
+    }
+
+    function renderTuningDetails(meta) {
+      if (!hasTuningDetails(meta)) return "";
+
+      const retrievalLimit =
+        meta.tuning_retrieval_limit ??
+        meta.retrieval_limit_override ??
+        "n/a";
+
+      const contextChars =
+        meta.tuning_context_chars ??
+        meta.max_context_chars ??
+        "n/a";
+
+      const numPredict =
+        meta.tuning_num_predict ??
+        meta.num_predict_override ??
+        "n/a";
+
+      const graphChunks =
+        meta.tuning_graph_chunks ??
+        meta.graph_max_chunks ??
+        meta.graph_chunks_added ??
+        "n/a";
+
+      return `
+        <details class="timing-details">
+          <summary>Runtime tuning</summary>
+          <div class="timing-grid">
+            <div><strong>Chunk limit:</strong> ${escapeHtml(retrievalLimit)}</div>
+            <div><strong>Context chars:</strong> ${escapeHtml(contextChars)}</div>
+            <div><strong>Answer tokens:</strong> ${escapeHtml(numPredict)}</div>
+            <div><strong>Graph chunks:</strong> ${escapeHtml(graphChunks)}</div>
+          </div>
+        </details>
+      `;
+    }
+
     function renderTimingDetails(meta) {
       if (!hasTimingDetails(meta)) return "";
 
@@ -1944,6 +2217,7 @@
       const sourceId = document.getElementById("sourceSelect").value.trim();
       const useGraphContext = Boolean(document.getElementById("graphContextToggle")?.checked);
       const retrievalSpeed = getRetrievalSpeed();
+      const tuning = getTuningSettings();
       const pageStart = "";
       const pageEnd = "";
 
@@ -1981,6 +2255,10 @@
           ollama_ms: "",
           audit_save_ms: "",
           total_latency_ms: "",
+          tuning_retrieval_limit: tuning.chunks,
+          tuning_context_chars: tuning.context_chars,
+          tuning_num_predict: tuning.num_predict,
+          tuning_graph_chunks: tuning.graph_chunks,
           progress: 5,
           progress_label: "Starting...",
         }
@@ -1993,6 +2271,10 @@
       params.set("q", q);
       params.set("request_id", activeRequestId);
       params.set("retrieval_speed", retrievalSpeed);
+      params.set("retrieval_limit_override", String(tuning.chunks));
+      params.set("max_context_chars", String(tuning.context_chars));
+      params.set("num_predict_override", String(tuning.num_predict));
+      params.set("graph_max_chunks", String(tuning.graph_chunks));
 
       if (currentConversationId) params.set("conversation_id", currentConversationId);
       if (sourceId) params.set("source_id", sourceId);
@@ -2046,6 +2328,10 @@
             ollama_ms: data.ollama_ms,
             audit_save_ms: data.audit_save_ms,
             total_latency_ms: data.total_latency_ms,
+            tuning_retrieval_limit: data.tuning_retrieval_limit ?? data.retrieval_limit_override ?? tuning.chunks,
+            tuning_context_chars: data.tuning_context_chars ?? data.max_context_chars ?? tuning.context_chars,
+            tuning_num_predict: data.tuning_num_predict ?? data.num_predict_override ?? tuning.num_predict,
+            tuning_graph_chunks: data.tuning_graph_chunks ?? data.graph_max_chunks ?? tuning.graph_chunks,
             progress: data.progress ?? 15,
             progress_label: data.progress_label || "Searching evidence.",
           };
@@ -2074,6 +2360,10 @@
           meta.ollama_ms = data.ollama_ms ?? meta.ollama_ms;
           meta.audit_save_ms = data.audit_save_ms ?? meta.audit_save_ms;
           meta.total_latency_ms = data.total_latency_ms ?? meta.total_latency_ms;
+          meta.tuning_retrieval_limit = data.tuning_retrieval_limit ?? data.retrieval_limit_override ?? tuning.chunks;
+          meta.tuning_context_chars = data.tuning_context_chars ?? data.max_context_chars ?? meta.tuning_context_chars ?? tuning.context_chars;
+          meta.tuning_num_predict = data.tuning_num_predict ?? data.num_predict_override ?? meta.tuning_num_predict ?? tuning.num_predict;
+          meta.tuning_graph_chunks = data.tuning_graph_chunks ?? data.graph_max_chunks ?? meta.tuning_graph_chunks ?? tuning.graph_chunks;
           updateLastAssistant(answer || "Evidence found. Generating answer...", { meta, citations });
         });
 
@@ -2196,6 +2486,10 @@
           meta.ollama_ms = data.ollama_ms ?? meta.ollama_ms;
           meta.audit_save_ms = data.audit_save_ms ?? meta.audit_save_ms;
           meta.total_latency_ms = data.total_latency_ms ?? meta.total_latency_ms ?? data.latency_ms;
+          meta.tuning_retrieval_limit = data.tuning_retrieval_limit ?? data.retrieval_limit_override ?? tuning.chunks;
+          meta.tuning_context_chars = data.tuning_context_chars ?? data.max_context_chars ?? meta.tuning_context_chars ?? tuning.context_chars;
+          meta.tuning_num_predict = data.tuning_num_predict ?? data.num_predict_override ?? meta.tuning_num_predict ?? tuning.num_predict;
+          meta.tuning_graph_chunks = data.tuning_graph_chunks ?? data.graph_max_chunks ?? meta.tuning_graph_chunks ?? tuning.graph_chunks;
 
           const finalAnswer = answer.trim()
             ? answer
@@ -2518,6 +2812,7 @@
 
     async function initApp() {
       applySidebarState();
+      applyTuningDefaultsForCurrentMode();
       bindStatePersistenceEvents();
       restoreChatState();
       restoreQuestionDraft();

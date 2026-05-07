@@ -17,6 +17,10 @@ COMPARISON_MARKERS = (
     " vs ",
     "better than",
     "pros and cons",
+    "advantages and disadvantages",
+    "tradeoff",
+    "trade-offs",
+    "which is better",
 )
 
 TROUBLESHOOTING_MARKERS = (
@@ -34,6 +38,12 @@ TROUBLESHOOTING_MARKERS = (
     "debug",
     "troubleshoot",
     "why is this happening",
+    "connection refused",
+    "permission denied",
+    "access denied",
+    "crash",
+    "crashed",
+    "stuck",
 )
 
 OVERVIEW_MARKERS = (
@@ -67,10 +77,67 @@ CODE_MARKERS = (
 
 ENTITY_LOOKUP_PATTERNS = (
     r"^\s*who\s+is\s+",
+    r"^\s*who\s+was\s+",
     r"^\s*what\s+is\s+",
+    r"^\s*what\s+are\s+",
     r"^\s*where\s+is\s+",
+    r"^\s*where\s+are\s+",
     r"^\s*tell\s+me\s+about\s+",
     r"^\s*define\s+",
+    r"^\s*meaning\s+of\s+",
+)
+
+YES_NO_PATTERNS = (
+    r"^\s*is\s+",
+    r"^\s*are\s+",
+    r"^\s*was\s+",
+    r"^\s*were\s+",
+    r"^\s*do\s+",
+    r"^\s*does\s+",
+    r"^\s*did\s+",
+    r"^\s*can\s+",
+    r"^\s*could\s+",
+    r"^\s*should\s+",
+    r"^\s*would\s+",
+    r"^\s*will\s+",
+    r"^\s*has\s+",
+    r"^\s*have\s+",
+    r"^\s*had\s+",
+)
+
+HOW_TO_PATTERNS = (
+    r"^\s*how\s+to\s+",
+    r"^\s*how\s+do\s+i\s+",
+    r"^\s*how\s+do\s+we\s+",
+    r"^\s*how\s+can\s+i\s+",
+    r"^\s*how\s+can\s+we\s+",
+    r"^\s*how\s+should\s+i\s+",
+    r"^\s*how\s+should\s+we\s+",
+    r"^\s*steps\s+to\s+",
+    r"^\s*best\s+way\s+to\s+",
+)
+
+LIST_PATTERNS = (
+    r"^\s*list\s+",
+    r"^\s*show\s+",
+    r"^\s*give\s+me\s+",
+    r"^\s*name\s+",
+    r"^\s*names\s+of\s+",
+    r"^\s*what\s+are\s+the\s+names\s+of\s+",
+)
+
+SOURCE_NAVIGATION_MARKERS = (
+    "where is it mentioned",
+    "where mentioned",
+    "where does it say",
+    "which file",
+    "which document",
+    "which source",
+    "which page",
+    "citation for",
+    "source for",
+    "find where",
+    "show where",
 )
 
 
@@ -114,6 +181,72 @@ def _looks_like_code(q: str) -> bool:
 def _looks_like_entity_lookup(q: str) -> bool:
     clean = _lower(q)
     return any(re.search(pattern, clean) for pattern in ENTITY_LOOKUP_PATTERNS)
+
+
+def _looks_like_yes_no_relationship(q: str) -> bool:
+    clean = _lower(q)
+    if not any(re.search(pattern, clean) for pattern in YES_NO_PATTERNS):
+        return False
+
+    relationship_markers = (
+        " part of ",
+        " included in ",
+        " related to ",
+        " belong to ",
+        " used in ",
+        " used for ",
+        " required for ",
+        " needed for ",
+        " depend on ",
+        " depends on ",
+        " connected to ",
+        " same as ",
+        " different from ",
+        " a type of ",
+        " an example of ",
+        " responsible for ",
+        " support ",
+        " supports ",
+        " include ",
+        " includes ",
+        " contain ",
+        " contains ",
+        " mean ",
+        " means ",
+    )
+
+    padded = f" {clean} "
+    return any(marker in padded for marker in relationship_markers) or clean.endswith("?")
+
+
+def _looks_like_how_to(q: str) -> bool:
+    clean = _lower(q)
+    return any(re.search(pattern, clean) for pattern in HOW_TO_PATTERNS)
+
+
+def _looks_like_list_or_examples(q: str) -> bool:
+    clean = _lower(q)
+    list_markers = (
+        "list of",
+        "names of",
+        "examples of",
+        "types of",
+        "tools",
+        "services",
+        "components",
+        "stages",
+        "steps",
+        "benefits",
+    )
+
+    return any(re.search(pattern, clean) for pattern in LIST_PATTERNS) or any(
+        marker in clean for marker in list_markers
+    )
+
+
+def _looks_like_source_navigation(q: str) -> bool:
+    clean = _lower(q)
+    return any(marker in clean for marker in SOURCE_NAVIGATION_MARKERS)
 
 
 def _extract_comparison_entities(query: str) -> list[str]:
@@ -168,7 +301,7 @@ def _apply_fast_mode(plan: dict[str, Any]) -> dict[str, Any]:
         )
         return fast
 
-    if query_shape == "entity_lookup":
+    if query_shape in {"entity_lookup", "definition", "yes_no_relationship", "source_navigation"}:
         fast.update(
             {
                 "candidate_top_k": 15,
@@ -178,12 +311,12 @@ def _apply_fast_mode(plan: dict[str, Any]) -> dict[str, Any]:
                 "use_keyword_search": True,
                 "use_vector_search": False,
                 "use_reranker": False,
-                "planner_reason": str(fast.get("planner_reason", "")) + " Fast mode: FTS5-first entity lookup, top 3 chunks, no reranker.",
+                "planner_reason": str(fast.get("planner_reason", "")) + " Fast mode: FTS5-first lookup, top 3 chunks, no reranker.",
             }
         )
         return fast
 
-    if query_shape in {"comparison", "troubleshooting", "code_explanation"}:
+    if query_shape in {"comparison", "troubleshooting", "code_explanation", "how_to_steps", "list_or_examples"}:
         fast.update(
             {
                 "candidate_top_k": 25,
@@ -239,7 +372,7 @@ def _apply_direct_mode(plan: dict[str, Any]) -> dict[str, Any]:
         )
         return direct
 
-    if query_shape == "entity_lookup":
+    if query_shape in {"entity_lookup", "definition", "yes_no_relationship", "source_navigation"}:
         direct.update(
             {
                 "candidate_top_k": 8,
@@ -249,7 +382,7 @@ def _apply_direct_mode(plan: dict[str, Any]) -> dict[str, Any]:
                 "use_keyword_search": True,
                 "use_vector_search": False,
                 "use_reranker": False,
-                "planner_reason": str(direct.get("planner_reason", "")) + " Direct mode: FTS5 entity snippets only, no Ollama.",
+                "planner_reason": str(direct.get("planner_reason", "")) + " Direct mode: FTS5 lookup snippets only, no Ollama.",
             }
         )
         return direct
@@ -292,10 +425,11 @@ def build_adaptive_retrieval_plan(
         or "normal_qa"
     )
 
+    question_type = str(base.get("question_type") or "")
     source_strategy = str(base.get("source_strategy") or "cluster_by_best_source")
 
     plan: dict[str, Any] = {
-        "query_shape": "normal_qa",
+        "query_shape": question_type or "normal_qa",
         "retrieval_mode": "vector_rerank",
         "rewritten_queries": base.get("rewritten_queries") or [clean_query],
         "candidate_top_k": int(base.get("candidate_top_k", DEFAULT_CANDIDATE_TOP_K) or DEFAULT_CANDIDATE_TOP_K),
@@ -330,7 +464,7 @@ def build_adaptive_retrieval_plan(
         )
         return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
 
-    if _looks_like_comparison(clean_query):
+    if _looks_like_comparison(clean_query) or question_type == "comparison":
         entities = _extract_comparison_entities(clean_query)
         rewritten = [clean_query] + entities if entities else [clean_query]
         plan.update(
@@ -398,10 +532,83 @@ def build_adaptive_retrieval_plan(
         )
         return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
 
-    if _looks_like_entity_lookup(clean_query):
+    if _looks_like_how_to(clean_query) or question_type == "how_to_steps":
         plan.update(
             {
-                "query_shape": "entity_lookup",
+                "query_shape": "how_to_steps",
+                "retrieval_mode": "keyword_first_hybrid",
+                "candidate_top_k": max(plan["candidate_top_k"], 50),
+                "final_top_k": max(plan["final_top_k"], 8),
+                "keyword_top_k": 35,
+                "neighbour_window": 1,
+                "use_keyword_search": True,
+                "use_vector_search": True,
+                "use_reranker": True,
+                "source_strategy": source_strategy,
+                "planner_reason": "How-to query detected, so retrieval uses hybrid search plus nearby supporting chunks.",
+            }
+        )
+        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+
+    if _looks_like_yes_no_relationship(clean_query) or question_type == "yes_no_relationship":
+        plan.update(
+            {
+                "query_shape": "yes_no_relationship",
+                "retrieval_mode": "keyword_first_hybrid",
+                "candidate_top_k": max(plan["candidate_top_k"], 50),
+                "final_top_k": max(plan["final_top_k"], 6),
+                "keyword_top_k": 35,
+                "neighbour_window": 1,
+                "use_keyword_search": True,
+                "use_vector_search": True,
+                "use_reranker": True,
+                "source_strategy": "cluster_by_best_source",
+                "planner_reason": "Yes/no relationship query detected, so keyword-first hybrid retrieval is safer than planner-only routing.",
+            }
+        )
+        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+
+    if _looks_like_source_navigation(clean_query) or question_type == "source_navigation":
+        plan.update(
+            {
+                "query_shape": "source_navigation",
+                "retrieval_mode": "keyword_first_hybrid",
+                "candidate_top_k": max(plan["candidate_top_k"], 50),
+                "final_top_k": max(plan["final_top_k"], 6),
+                "keyword_top_k": 40,
+                "neighbour_window": 0,
+                "use_keyword_search": True,
+                "use_vector_search": True,
+                "use_reranker": True,
+                "source_strategy": source_strategy,
+                "planner_reason": "Source navigation query detected, so retrieval prioritizes exact source/citation matches.",
+            }
+        )
+        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+
+    if _looks_like_list_or_examples(clean_query) or question_type == "list_or_examples":
+        plan.update(
+            {
+                "query_shape": "list_or_examples",
+                "retrieval_mode": "keyword_first_hybrid",
+                "candidate_top_k": max(plan["candidate_top_k"], 50),
+                "final_top_k": max(plan["final_top_k"], 8),
+                "keyword_top_k": 40,
+                "neighbour_window": 0,
+                "use_keyword_search": True,
+                "use_vector_search": True,
+                "use_reranker": True,
+                "source_strategy": "allow_multiple_sources",
+                "planner_reason": "List/examples query detected, so retrieval allows multiple sources and prioritizes matching terms.",
+            }
+        )
+        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+
+    if _looks_like_entity_lookup(clean_query) or question_type in {"direct_factual", "definition", "entity_lookup"}:
+        shape = "definition" if question_type == "definition" else "entity_lookup"
+        plan.update(
+            {
+                "query_shape": shape,
                 "retrieval_mode": "keyword_first_hybrid",
                 "candidate_top_k": max(plan["candidate_top_k"], 60),
                 "final_top_k": max(plan["final_top_k"], 8),
@@ -409,7 +616,7 @@ def build_adaptive_retrieval_plan(
                 "neighbour_window": 1,
                 "use_keyword_search": True,
                 "source_strategy": "cluster_by_best_source",
-                "planner_reason": "Entity lookup detected, so keyword-first hybrid retrieval is safer than vector-only retrieval.",
+                "planner_reason": "Entity/definition lookup detected, so keyword-first hybrid retrieval is safer than vector-only retrieval.",
             }
         )
         return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)

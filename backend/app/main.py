@@ -432,6 +432,10 @@ def ask_stream(
     request_id: str | None = None,
     use_graph_context: bool = False,
     retrieval_speed: str = "normal",
+    retrieval_limit_override: int | None = None,
+    max_context_chars: int | None = None,
+    num_predict_override: int | None = None,
+    graph_max_chunks: int | None = None,
 ):
     if not q:
         raise InfraRAGError("query parameter 'q' is required", status_code=400, code="missing_query")
@@ -449,6 +453,10 @@ def ask_stream(
             request_id=request_id,
             use_graph_context=use_graph_context,
             retrieval_speed=retrieval_speed,
+            retrieval_limit_override=retrieval_limit_override,
+            max_context_chars=max_context_chars,
+            num_predict_override=num_predict_override,
+            graph_max_chunks=graph_max_chunks,
         ),
         media_type="text/event-stream",
         headers={

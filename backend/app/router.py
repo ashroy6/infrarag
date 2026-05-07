@@ -62,6 +62,10 @@ def _base_response(
     }
 
 
+def _clean(q: str) -> str:
+    return " ".join((q or "").lower().split())
+
+
 def _looks_like_file_question(q: str) -> bool:
     file_markers = (
         ".py",
@@ -155,6 +159,12 @@ def _looks_like_incident_question(q: str) -> bool:
         "debug",
         "why is this happening",
         "request failed",
+        "connection refused",
+        "permission denied",
+        "access denied",
+        "crash",
+        "crashed",
+        "stuck",
     )
 
     return any(marker in q for marker in incident_markers)
@@ -240,20 +250,171 @@ def _looks_like_numbered_followup(q: str) -> bool:
     )
 
 
+def _looks_like_comparison_question(q: str) -> bool:
+    comparison_markers = (
+        "compare",
+        "difference between",
+        "differences between",
+        " vs ",
+        " versus ",
+        "better than",
+        "pros and cons",
+        "advantages and disadvantages",
+        "tradeoff",
+        "trade-offs",
+        "which is better",
+    )
+
+    padded = f" {q} "
+    return any(marker in padded for marker in comparison_markers)
+
+
+def _looks_like_yes_no_relationship_question(q: str) -> bool:
+    """
+    Universal yes/no relationship questions.
+
+    Examples:
+    - is CI/CD part of DevOps?
+    - are containers used in Kubernetes?
+    - does Terraform manage infrastructure?
+    - can DevOps include monitoring?
+    """
+    yes_no_start = (
+        r"^is\s+",
+        r"^are\s+",
+        r"^was\s+",
+        r"^were\s+",
+        r"^do\s+",
+        r"^does\s+",
+        r"^did\s+",
+        r"^can\s+",
+        r"^could\s+",
+        r"^should\s+",
+        r"^would\s+",
+        r"^will\s+",
+        r"^has\s+",
+        r"^have\s+",
+        r"^had\s+",
+    )
+
+    if not any(re.search(pattern, q, flags=re.IGNORECASE) for pattern in yes_no_start):
+        return False
+
+    relationship_markers = (
+        " part of ",
+        " included in ",
+        " related to ",
+        " belong to ",
+        " used in ",
+        " used for ",
+        " required for ",
+        " needed for ",
+        " depend on ",
+        " depends on ",
+        " connected to ",
+        " same as ",
+        " different from ",
+        " a type of ",
+        " an example of ",
+        " responsible for ",
+        " support ",
+        " supports ",
+        " include ",
+        " includes ",
+        " contain ",
+        " contains ",
+        " mean ",
+        " means ",
+    )
+
+    padded = f" {q} "
+    return any(marker in padded for marker in relationship_markers) or q.endswith("?")
+
+
+def _looks_like_how_to_question(q: str) -> bool:
+    how_to_patterns = (
+        r"^how\s+to\s+",
+        r"^how\s+do\s+i\s+",
+        r"^how\s+do\s+we\s+",
+        r"^how\s+can\s+i\s+",
+        r"^how\s+can\s+we\s+",
+        r"^how\s+should\s+i\s+",
+        r"^how\s+should\s+we\s+",
+        r"^steps\s+to\s+",
+        r"^best\s+way\s+to\s+",
+    )
+
+    return any(re.search(pattern, q, flags=re.IGNORECASE) for pattern in how_to_patterns)
+
+
+def _looks_like_definition_question(q: str) -> bool:
+    definition_patterns = (
+        r"^what\s+is\s+",
+        r"^what\s+are\s+",
+        r"^define\s+",
+        r"^meaning\s+of\s+",
+        r"^tell\s+me\s+about\s+",
+    )
+
+    return any(re.search(pattern, q, flags=re.IGNORECASE) for pattern in definition_patterns)
+
+
+def _looks_like_list_question(q: str) -> bool:
+    list_patterns = (
+        r"^list\s+",
+        r"^show\s+",
+        r"^give\s+me\s+",
+        r"^name\s+",
+        r"^names\s+of\s+",
+        r"^what\s+are\s+the\s+names\s+of\s+",
+        r"^what\s+are\s+the\s+",
+    )
+
+    list_markers = (
+        "list of",
+        "names of",
+        "examples of",
+        "types of",
+        "tools",
+        "services",
+        "components",
+        "steps",
+        "stages",
+        "benefits",
+    )
+
+    return any(re.search(pattern, q, flags=re.IGNORECASE) for pattern in list_patterns) or any(
+        marker in q for marker in list_markers
+    )
+
+
+def _looks_like_source_navigation_question(q: str) -> bool:
+    navigation_markers = (
+        "where is",
+        "where are",
+        "where does it say",
+        "which file",
+        "which document",
+        "which source",
+        "which page",
+        "where mentioned",
+        "where is it mentioned",
+        "find where",
+        "show where",
+        "citation for",
+        "source for",
+    )
+
+    return any(marker in q for marker in navigation_markers)
+
+
 def _looks_like_direct_factual_question(q: str) -> bool:
     """
     Fast-path simple factual/document questions.
 
     These should not call the LLM planner. They only need normal retrieval + answer.
-    Generic examples:
-    - who is X
-    - what is X
-    - where is X
-    - list the names of X
-    - tell me about X from the CV/document
-    - what are the names/items/tools/projects/roles in source
     """
-    clean = " ".join((q or "").lower().split())
+    clean = _clean(q)
     if not clean:
         return False
 
@@ -266,6 +427,10 @@ def _looks_like_direct_factual_question(q: str) -> bool:
         return False
     if _looks_like_file_question(clean):
         return False
+    if _looks_like_comparison_question(clean):
+        return False
+    if _looks_like_how_to_question(clean):
+        return False
 
     direct_patterns = (
         r"^who\s+",
@@ -273,6 +438,11 @@ def _looks_like_direct_factual_question(q: str) -> bool:
         r"^where\s+",
         r"^when\s+",
         r"^which\s+",
+        r"^is\s+",
+        r"^are\s+",
+        r"^do\s+",
+        r"^does\s+",
+        r"^can\s+",
         r"^list\s+",
         r"^show\s+",
         r"^give\s+me\s+",
@@ -282,6 +452,7 @@ def _looks_like_direct_factual_question(q: str) -> bool:
         r"^names\s+of\s+",
         r"^what\s+are\s+the\s+names\s+of\s+",
         r"^what\s+are\s+",
+        r"^define\s+",
     )
 
     if any(re.search(pattern, clean, flags=re.IGNORECASE) for pattern in direct_patterns):
@@ -310,10 +481,8 @@ def _looks_like_direct_factual_question(q: str) -> bool:
     return any(marker in clean for marker in factual_markers)
 
 
-
-
 def decide_intent(question: str, chat_context: str = "") -> dict[str, Any]:
-    q = " ".join((question or "").lower().split())
+    q = _clean(question)
 
     # 1. Hard rules first. Do not waste time calling Ollama planner for obvious cases.
 
@@ -413,6 +582,90 @@ def decide_intent(question: str, chat_context: str = "") -> dict[str, Any]:
             final_top_k=6,
             source_strategy="cluster_by_best_source",
             question_type="topic_summary",
+        )
+
+    if _looks_like_comparison_question(q):
+        return _base_response(
+            pipeline="long_explanation",
+            question=question,
+            reason="Rules-first router selected long explanation because the question asks for comparison, trade-offs, or differences.",
+            confidence=0.9,
+            answer_length="long",
+            needs_all_chunks=False,
+            candidate_top_k=70,
+            final_top_k=10,
+            source_strategy="allow_multiple_sources",
+            question_type="comparison",
+        )
+
+    if _looks_like_how_to_question(q):
+        return _base_response(
+            pipeline="normal_qa",
+            question=question,
+            reason="Rules-first router selected normal Q&A because the question asks for practical how-to guidance.",
+            confidence=0.88,
+            answer_length="balanced",
+            needs_all_chunks=False,
+            candidate_top_k=50,
+            final_top_k=8,
+            source_strategy="cluster_by_best_source",
+            question_type="how_to_steps",
+        )
+
+    if _looks_like_yes_no_relationship_question(q):
+        return _base_response(
+            pipeline="normal_qa",
+            question=question,
+            reason="Rules-first router selected normal Q&A because the question asks a yes/no relationship or classification.",
+            confidence=0.9,
+            answer_length="concise",
+            needs_all_chunks=False,
+            candidate_top_k=40,
+            final_top_k=6,
+            source_strategy="cluster_by_best_source",
+            question_type="yes_no_relationship",
+        )
+
+    if _looks_like_source_navigation_question(q):
+        return _base_response(
+            pipeline="normal_qa",
+            question=question,
+            reason="Rules-first router selected normal Q&A because the question asks to locate supporting evidence or source location.",
+            confidence=0.9,
+            answer_length="concise",
+            needs_all_chunks=False,
+            candidate_top_k=40,
+            final_top_k=6,
+            source_strategy="cluster_by_best_source",
+            question_type="source_navigation",
+        )
+
+    if _looks_like_definition_question(q):
+        return _base_response(
+            pipeline="normal_qa",
+            question=question,
+            reason="Rules-first router selected normal Q&A because the question asks for a definition or entity explanation.",
+            confidence=0.9,
+            answer_length="concise",
+            needs_all_chunks=False,
+            candidate_top_k=40,
+            final_top_k=6,
+            source_strategy="cluster_by_best_source",
+            question_type="definition",
+        )
+
+    if _looks_like_list_question(q):
+        return _base_response(
+            pipeline="normal_qa",
+            question=question,
+            reason="Rules-first router selected normal Q&A because the question asks for a list, names, examples, tools, or components.",
+            confidence=0.88,
+            answer_length="balanced",
+            needs_all_chunks=False,
+            candidate_top_k=50,
+            final_top_k=8,
+            source_strategy="allow_multiple_sources",
+            question_type="list_or_examples",
         )
 
     if _looks_like_direct_factual_question(q):
