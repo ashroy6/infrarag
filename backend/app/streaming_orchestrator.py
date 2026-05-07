@@ -59,9 +59,9 @@ NORMAL_QA_RUNTIME_DEFAULTS = {
         "graph_max_chunks": 3,
     },
     "fast": {
-        "retrieval_limit": 3,
-        "max_context_chars": 3500,
-        "num_predict": 180,
+        "retrieval_limit": 5,
+        "max_context_chars": 5500,
+        "num_predict": 260,
         "graph_max_chunks": 2,
     },
     "direct": {
@@ -196,6 +196,89 @@ def _resolve_source_from_files_table(requested_file: str) -> dict[str, str] | No
         "source_id": str(best["source_id"]),
         "source_path": str(best["source_path"]),
     }
+
+
+
+def _display_source_name(value: str | None) -> str:
+    clean = str(value or "").replace("\\", "/").strip()
+    if not clean:
+        return "retrieved source"
+    return PurePosixPath(clean).name or clean
+
+
+def _question_terms_for_source_match(question: str) -> set[str]:
+    # Remove quoted phrase first so source matching does not use phrase words.
+    text = re.sub(r'"[^"]+"|\'[^\']+\'', " ", question or "")
+    terms = {
+        item.lower()
+        for item in re.findall(r"[A-Za-z0-9_-]+", text)
+        if len(item) >= 3
+    }
+    stop = {
+        "where", "does", "say", "find", "show", "source", "page",
+        "chunk", "document", "file", "the", "and", "for", "with",
+        "from", "inside", "what", "who", "when", "which", "how",
+    }
+    return {term for term in terms if term not in stop}
+
+
+def _resolve_named_source_from_question(question: str) -> dict[str, str] | None:
+    """
+    Generic source-name resolver.
+
+    Example:
+    - question: Where does it say "In the beginning" in Bible?
+    - file: /app/data/uploads/bible.txt
+    - result: source_id for bible.txt
+
+    This is not Bible-specific. It matches user words against uploaded filenames.
+    """
+    terms = _question_terms_for_source_match(question)
+    if not terms:
+        return None
+
+    try:
+        records = MetadataDB().list_active_files(source_group="regular_chat")
+    except Exception:
+        return None
+
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+
+    for record in records:
+        source_path = str(record.get("source_path") or "")
+        source_id = str(record.get("source_id") or "").strip()
+        if not source_id or not source_path:
+            continue
+
+        display_name = _display_source_name(source_path).lower()
+        stem = PurePosixPath(display_name).stem.lower()
+        source_tokens = {
+            item.lower()
+            for item in re.findall(r"[A-Za-z0-9_-]+", f"{display_name} {stem}")
+            if len(item) >= 3
+        }
+
+        overlap = terms.intersection(source_tokens)
+        if not overlap:
+            continue
+
+        # Stronger score for exact stem hit, then token overlap.
+        stem_hit = 1 if stem in terms else 0
+        score = (10 * stem_hit) + (3 * len(overlap))
+
+        candidates.append((score, -len(source_path), record))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    best = candidates[0][2]
+
+    return {
+        "source_id": str(best.get("source_id") or ""),
+        "source_path": str(best.get("source_path") or ""),
+    }
+
 
 
 def _pipeline_limits(pipeline_used: str) -> tuple[int, int]:
@@ -469,6 +552,35 @@ def _extract_entity_from_lookup_question(question: str) -> str:
     return q.strip(" .,:;?!'\"")
 
 
+def _quoted_phrases_from_question(question: str) -> list[str]:
+    phrases: list[str] = []
+    pattern = r"\\\"([^\\\"]+)\\\"|'([^']+)'"
+    for match in re.finditer(pattern, question or ""):
+        phrase = (match.group(1) or match.group(2) or "").strip()
+        if phrase:
+            phrases.append(phrase)
+    return phrases
+
+
+def _chunk_location_for_direct_answer(chunk: dict[str, Any]) -> str:
+    parts: list[str] = []
+
+    if chunk.get("section_title"):
+        parts.append(f"Section: {chunk.get('section_title')}")
+
+    if chunk.get("page_number") is not None:
+        parts.append(f"Page: {chunk.get('page_number')}")
+    elif chunk.get("page_start") is not None and chunk.get("page_end") is not None:
+        parts.append(f"Pages: {chunk.get('page_start')}-{chunk.get('page_end')}")
+
+    if chunk.get("record_type"):
+        parts.append(f"Record: {chunk.get('record_type')}")
+
+    parts.append(f"Chunk: {chunk.get('chunk_index', '')}")
+
+    return " | ".join(str(item) for item in parts if str(item).strip())
+
+
 def _direct_answer_from_chunks(
     *,
     question: str,
@@ -480,17 +592,37 @@ def _direct_answer_from_chunks(
     if not chunks:
         return "No evidence found in the knowledge base."
 
-    top = chunks[0]
-    source = top.get("source") or "retrieved source"
-    chunk_index = top.get("chunk_index", "")
-    snippet = _clean_direct_snippet(top.get("text", ""), max_chars=900)
-
     if query_shape == "exact_phrase":
-        return (
-            f"Found a matching passage in {source}, chunk {chunk_index}.\n\n"
-            f"{snippet}\n\n"
-            f"Open citation [1] for the full evidence."
-        )
+        phrases = _quoted_phrases_from_question(question)
+        phrase = phrases[0] if phrases else str(chunks[0].get("matching_phrase") or "requested phrase")
+
+        verified_chunks = [
+            chunk for chunk in chunks
+            if chunk.get("exact_phrase_verified") or chunk.get("matching_snippet")
+        ] or chunks
+
+        lines = [f'Found exact phrase: "{phrase}"', ""]
+
+        for idx, chunk in enumerate(verified_chunks, start=1):
+            source = _display_source_name(chunk.get("source"))
+            location = _chunk_location_for_direct_answer(chunk)
+            snippet = _clean_direct_snippet(
+                chunk.get("matching_snippet") or chunk.get("text", ""),
+                max_chars=900,
+            )
+
+            lines.append(f"{idx}. {source}")
+            lines.append(f"   {location}")
+            lines.append(f"   {snippet}")
+            lines.append("")
+
+        lines.append("Open the citations for the full evidence.")
+        return "\n".join(lines).strip()
+
+    top = chunks[0]
+    source = _display_source_name(top.get("source"))
+    chunk_index = top.get("chunk_index", "")
+    snippet = _clean_direct_snippet(top.get("matching_snippet") or top.get("text", ""), max_chars=900)
 
     if query_shape == "entity_lookup":
         entity = _extract_entity_from_lookup_question(question)
@@ -514,16 +646,21 @@ def _can_use_direct_answer(
     query_shape: str,
     exact_file_mode: bool,
 ) -> bool:
-    if retrieval_speed != "direct":
-        return False
-
     if exact_file_mode:
         return False
 
     if pipeline_used not in {"normal_qa"}:
         return False
 
-    return query_shape in {"entity_lookup", "exact_phrase", "normal_qa", "section_summary"}
+    # Exact phrase lookup is deterministic search, not generation.
+    # Always skip Ollama for this, even in Quick AI or Deep AI mode.
+    if query_shape == "exact_phrase":
+        return True
+
+    if retrieval_speed != "direct":
+        return False
+
+    return query_shape in {"entity_lookup", "normal_qa", "section_summary"}
 
 
 def _mode_label_from_speed(retrieval_speed: str) -> str:
@@ -741,6 +878,18 @@ def stream_ask_events(
 
         if not source_id and source_resolution.get("source_id"):
             source_id = str(source_resolution.get("source_id"))
+
+        if not source_id:
+            named_source = _resolve_named_source_from_question(effective_question)
+            if named_source and named_source.get("source_id"):
+                source_id = str(named_source["source_id"])
+                source_resolution = {
+                    **source_resolution,
+                    "mode": "named_source_match",
+                    "reason": "Matched words in the question to an uploaded source filename.",
+                    "source_id": named_source.get("source_id"),
+                    "source_path": named_source.get("source_path"),
+                }
 
         routing = decide_intent(effective_question, chat_context=chat_context)
         routing["original_question"] = normalized_question
@@ -1166,7 +1315,7 @@ def stream_ask_events(
             verification_result = {
                 "verification_verdict": "skipped_direct",
                 "unsupported_claims": [],
-                "verification_reason": "Direct mode skipped Ollama and returned retrieved evidence snippet.",
+                "verification_reason": "Direct deterministic retrieval skipped Ollama and returned retrieved evidence snippets.",
                 "verified": False,
             }
 
@@ -1221,7 +1370,7 @@ def stream_ask_events(
                 answer=answer,
                 routing={**routing, **verification_result},
                 citations=citations,
-                model="direct_backend_snippet",
+                model="direct_backend_snippet" if actual_query_shape != "exact_phrase" else "direct_exact_phrase_lookup",
                 latency_ms=latency_ms,
             )
 
@@ -1451,11 +1600,15 @@ def stream_ask_events(
         # Verification adds large latency and little value for this narrow case.
         # For normal Q&A, verifier stays skipped unless the model denies evidence
         # even though retrieval produced citations.
-        if (not exact_file_mode) and should_verify_answer(
-            pipeline_used=pipeline_used,
-            routing=routing,
-            answer=answer,
-            citations=citations,
+        if (
+            clean_retrieval_speed == "normal"
+            and (not exact_file_mode)
+            and should_verify_answer(
+                pipeline_used=pipeline_used,
+                routing=routing,
+                answer=answer,
+                citations=citations,
+            )
         ):
             yield _sse(
                 "verification_status",
@@ -1518,7 +1671,7 @@ def stream_ask_events(
         # Generic recovery:
         # If retrieval produced citations but the model still denies evidence,
         # run a stricter second pass before clearing citations.
-        if (not exact_file_mode) and answer_denies_evidence(answer, citations):
+        if clean_retrieval_speed == "normal" and (not exact_file_mode) and answer_denies_evidence(answer, citations):
             yield _sse(
                 "verification_status",
                 {

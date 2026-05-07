@@ -9,6 +9,11 @@ DEFAULT_FINAL_TOP_K = 6
 QUOTE_RE = re.compile(r'"([^"]+)"|\'([^\']+)\'')
 PAGE_RE = re.compile(r"\bpages?\s+\d+\s*(?:-|to)?\s*\d*\b", re.IGNORECASE)
 
+SECTION_REFERENCE_RE = re.compile(
+    r"\b(?:chapter|section|part|book)\s+\d{1,4}\b|\b[A-Z][A-Za-z0-9_-]{2,40}\s+\d{1,4}\b",
+    re.IGNORECASE,
+)
+
 COMPARISON_MARKERS = (
     "compare",
     "difference between",
@@ -178,6 +183,28 @@ def _looks_like_code(q: str) -> bool:
     return any(marker in clean for marker in CODE_MARKERS)
 
 
+def _looks_like_section_reference(q: str) -> bool:
+    clean = _clean_query(q)
+    if not clean:
+        return False
+
+    if SECTION_REFERENCE_RE.search(clean):
+        section_words = (
+            "what happens",
+            "what is in",
+            "summarize",
+            "summarise",
+            "summary",
+            "explain",
+            "describe",
+            "tell me about",
+        )
+        lower = clean.lower()
+        return any(marker in lower for marker in section_words)
+
+    return False
+
+
 def _looks_like_entity_lookup(q: str) -> bool:
     clean = _lower(q)
     return any(re.search(pattern, clean) for pattern in ENTITY_LOOKUP_PATTERNS)
@@ -312,6 +339,21 @@ def _apply_fast_mode(plan: dict[str, Any]) -> dict[str, Any]:
                 "use_vector_search": False,
                 "use_reranker": False,
                 "planner_reason": str(fast.get("planner_reason", "")) + " Fast mode: FTS5-first lookup, top 3 chunks, no reranker.",
+            }
+        )
+        return fast
+
+    if query_shape in {"section_summary", "section_reference"}:
+        fast.update(
+            {
+                "candidate_top_k": 45,
+                "final_top_k": 6,
+                "keyword_top_k": 35,
+                "neighbour_window": 1,
+                "use_keyword_search": True,
+                "use_vector_search": True,
+                "use_reranker": False,
+                "planner_reason": str(fast.get("planner_reason", "")) + " Fast mode: section hybrid search with nearby chunks, no reranker.",
             }
         )
         return fast
@@ -600,6 +642,24 @@ def build_adaptive_retrieval_plan(
                 "use_reranker": True,
                 "source_strategy": "allow_multiple_sources",
                 "planner_reason": "List/examples query detected, so retrieval allows multiple sources and prioritizes matching terms.",
+            }
+        )
+        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+
+    if _looks_like_section_reference(clean_query) or question_type in {"section_summary", "section_reference"}:
+        plan.update(
+            {
+                "query_shape": "section_summary",
+                "retrieval_mode": "section_retrieval",
+                "candidate_top_k": max(plan["candidate_top_k"], 70),
+                "final_top_k": max(plan["final_top_k"], 10),
+                "keyword_top_k": 60,
+                "neighbour_window": 1,
+                "use_keyword_search": True,
+                "use_vector_search": True,
+                "use_reranker": True,
+                "source_strategy": "cluster_by_best_source",
+                "planner_reason": "Section/chapter reference detected, so retrieval uses section-aware hybrid search with nearby chunks.",
             }
         )
         return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)

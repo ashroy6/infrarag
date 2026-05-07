@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 from typing import Any
 
 from app.answer_verifier import answer_denies_evidence, should_verify_answer, verify_answer
@@ -15,96 +14,6 @@ from app.source_resolver import resolve_source_for_question
 MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "0.35"))
 NORMAL_QA_LIMIT = int(os.getenv("NORMAL_QA_LIMIT", "6"))
 NORMAL_QA_NUM_PREDICT = int(os.getenv("NORMAL_QA_NUM_PREDICT", "500"))
-
-QUOTE_RE = re.compile(r'"([^"]+)"|\'([^\']+)\'')
-
-
-def _quoted_phrases(question: str) -> list[str]:
-    phrases: list[str] = []
-    for match in QUOTE_RE.finditer(question or ""):
-        value = (match.group(1) or match.group(2) or "").strip()
-        if value:
-            phrases.append(value)
-    return phrases
-
-
-def _is_exact_phrase_result(question: str, chunks: list[dict[str, Any]]) -> bool:
-    if not _quoted_phrases(question):
-        return False
-    return any(
-        chunk.get("retrieval_mode") == "exact_phrase_search"
-        or chunk.get("exact_phrase_verified")
-        or chunk.get("query_shape") == "exact_phrase"
-        for chunk in chunks
-    )
-
-
-def _format_location(chunk: dict[str, Any]) -> str:
-    location_parts: list[str] = []
-
-    if chunk.get("section_title"):
-        location_parts.append(f"Section: {chunk.get('section_title')}")
-
-    if chunk.get("page_number") is not None:
-        location_parts.append(f"Page: {chunk.get('page_number')}")
-    elif chunk.get("page_start") is not None and chunk.get("page_end") is not None:
-        location_parts.append(f"Pages: {chunk.get('page_start')}-{chunk.get('page_end')}")
-
-    if chunk.get("record_type"):
-        location_parts.append(f"Record: {chunk.get('record_type')}")
-
-    location_parts.append(f"Chunk: {chunk.get('chunk_index', -1)}")
-
-    return " | ".join(location_parts)
-
-
-def _direct_exact_phrase_answer(question: str, chunks: list[dict[str, Any]]) -> dict[str, Any]:
-    phrases = _quoted_phrases(question)
-    phrase = phrases[0] if phrases else "requested phrase"
-
-    verified_chunks = [
-        chunk for chunk in chunks
-        if chunk.get("exact_phrase_verified") or chunk.get("matching_snippet")
-    ]
-
-    if not verified_chunks:
-        verified_chunks = chunks
-
-    compacted = compact_chunks(verified_chunks, max_chars_per_chunk=900, max_total_chars=5000)
-    citations = build_citations(compacted)
-    context_text = build_context_text(compacted)
-
-    lines = [f'Found exact phrase: "{phrase}"', ""]
-
-    for idx, chunk in enumerate(compacted, start=1):
-        source = chunk.get("source", "unknown")
-        location = _format_location(chunk)
-        snippet = (
-            chunk.get("matching_snippet")
-            or chunk.get("text", "")
-        ).strip()
-
-        if len(snippet) > 900:
-            snippet = snippet[:900].rstrip() + " ..."
-
-        lines.append(f"{idx}. {source}")
-        lines.append(f"   {location}")
-        lines.append(f"   {snippet}")
-        lines.append("")
-
-    lines.append("Open the citations for the full evidence.")
-
-    return {
-        "answer": "\n".join(lines).strip(),
-        "citations": citations,
-        "verification_context_text": context_text,
-        "retrieval_mode": "exact_phrase_search",
-        "query_shape": "exact_phrase",
-        "verification_verdict": "skipped_direct",
-        "unsupported_claims": [],
-        "verification_reason": "Exact phrase lookup was answered deterministically from verified retrieved text.",
-        "verified": False,
-    }
 
 
 def run(
@@ -139,9 +48,6 @@ def run(
 
     if not chunks:
         return no_evidence_response()
-
-    if _is_exact_phrase_result(question, chunks):
-        return _direct_exact_phrase_answer(question, chunks)
 
     top_score = max(float(c.get("score", 0.0) or 0.0) for c in chunks)
     if top_score < MIN_SCORE_THRESHOLD:
@@ -188,6 +94,9 @@ def run(
         if verdict in {"needs_revision", "insufficient_evidence"} and corrected:
             answer = corrected
 
+    # Generic recovery:
+    # If retrieval produced citations but the model still denies evidence,
+    # run a stricter second pass before giving up.
     if answer_denies_evidence(answer, citations):
         recovery_prompt = DENIAL_RECOVERY_PROMPT.format(
             question=question,
@@ -208,6 +117,9 @@ def run(
                 "verified": False,
             }
 
+    # Important:
+    # If retrieval produced citations, do not hide them just because the model failed.
+    # Returning citations keeps the system debuggable and allows the UI/user to inspect evidence.
     if answer.strip() == "No evidence found in the knowledge base." and citations:
         return {
             "answer": (

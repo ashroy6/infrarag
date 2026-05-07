@@ -17,7 +17,6 @@ from app.graph_extractor import build_graph_for_file
 from app.graph_store import GraphStore
 from app.incremental_ingest import collect_changed_files
 from app.ingestion_progress import is_ingestion_cancelled, update_ingestion_progress
-from app.keyword_index import index_source
 from app.metadata_db import MetadataDB
 from app.pdf_parser import parse_pdf_file, supports as supports_pdf
 from app.qdrant_client import (
@@ -444,8 +443,6 @@ def ingest_paths(
             "duplicate_files": [],
             "graph_built": [],
             "graph_failed": [],
-            "keyword_indexed": [],
-            "keyword_index_failed": [],
             "ingest_metadata": {
                 "tenant_id": ingest_metadata["tenant_id"],
                 "source_group": ingest_metadata["source_group"],
@@ -463,8 +460,6 @@ def ingest_paths(
     duplicate_files: list[dict[str, str]] = []
     graph_built: list[dict[str, Any]] = []
     graph_failed: list[dict[str, str]] = []
-    keyword_indexed: list[dict[str, Any]] = []
-    keyword_index_failed: list[dict[str, str]] = []
 
     update_ingestion_progress(
         stage="ingesting_files",
@@ -707,24 +702,6 @@ def ingest_paths(
             )
             metadata_db.replace_chunks(source_id=source_id, chunk_records=chunk_records)
 
-            try:
-                update_ingestion_progress(
-                    stage=f"indexing_keyword_search:{Path(file_path).name}",
-                    total_units=total_chunks_for_file,
-                    processed_units=total_points,
-                    progress_percent=90,
-                )
-                keyword_indexed.append(index_source(source_id))
-            except Exception as keyword_exc:
-                logger.exception("Failed to rebuild FTS5 keyword index for source: %s", source_id)
-                keyword_index_failed.append(
-                    {
-                        "path": file_path,
-                        "source_id": source_id,
-                        "error": str(keyword_exc),
-                    }
-                )
-
             if total_points > GRAPH_BUILD_MAX_CHUNKS_INLINE:
                 graph_built.append(
                     {
@@ -800,8 +777,6 @@ def ingest_paths(
         "duplicate_files": duplicate_files,
         "graph_built": graph_built,
         "graph_failed": graph_failed,
-        "keyword_indexed": keyword_indexed,
-        "keyword_index_failed": keyword_index_failed,
         "ingest_metadata": {
             "tenant_id": ingest_metadata["tenant_id"],
             "source_group": ingest_metadata["source_group"],

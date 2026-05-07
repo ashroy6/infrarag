@@ -408,6 +408,33 @@ def _looks_like_source_navigation_question(q: str) -> bool:
     return any(marker in q for marker in navigation_markers)
 
 
+def _looks_like_section_reference_question(q: str) -> bool:
+    clean = _clean(q)
+    if not clean:
+        return False
+
+    has_ref = bool(
+        re.search(r"\b(?:chapter|section|part|book)\s+\d{1,4}\b", clean, flags=re.IGNORECASE)
+        or re.search(r"\b[A-Za-z][A-Za-z0-9_-]{2,40}\s+\d{1,4}\b", clean)
+    )
+
+    if not has_ref:
+        return False
+
+    markers = (
+        "what happens",
+        "what is in",
+        "summarize",
+        "summarise",
+        "summary",
+        "explain",
+        "describe",
+        "tell me about",
+    )
+
+    return any(marker in clean for marker in markers)
+
+
 def _looks_like_direct_factual_question(q: str) -> bool:
     """
     Fast-path simple factual/document questions.
@@ -596,6 +623,20 @@ def decide_intent(question: str, chat_context: str = "") -> dict[str, Any]:
             final_top_k=10,
             source_strategy="allow_multiple_sources",
             question_type="comparison",
+        )
+
+    if _looks_like_section_reference_question(q):
+        return _base_response(
+            pipeline="normal_qa",
+            question=question,
+            reason="Rules-first router selected normal Q&A because the question asks about a chapter, section, or numbered part of a source.",
+            confidence=0.9,
+            answer_length="balanced",
+            needs_all_chunks=False,
+            candidate_top_k=70,
+            final_top_k=10,
+            source_strategy="cluster_by_best_source",
+            question_type="section_summary",
         )
 
     if _looks_like_how_to_question(q):

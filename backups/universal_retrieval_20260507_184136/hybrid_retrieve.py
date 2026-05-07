@@ -23,32 +23,10 @@ STOP_WORDS = {
 
 MAX_KEYWORD_SCAN_SOURCES = int(os.getenv("MAX_KEYWORD_SCAN_SOURCES", "80"))
 MAX_KEYWORD_SCAN_CHUNKS_PER_SOURCE = int(os.getenv("MAX_KEYWORD_SCAN_CHUNKS_PER_SOURCE", "3000"))
-EXACT_PHRASE_SCAN_LIMIT_PER_SOURCE = int(os.getenv("EXACT_PHRASE_SCAN_LIMIT_PER_SOURCE", "5000"))
 
 
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
-
-
-
-def exact_phrase_in_text(text: str, phrase: str) -> bool:
-    """
-    Word-boundary exact phrase check.
-
-    Matches:
-      "In the beginning"
-
-    Rejects:
-      "in the beginnings"
-    """
-    clean_phrase = re.sub(r"\s+", " ", str(phrase or "").strip())
-    if not clean_phrase:
-        return False
-
-    words = clean_phrase.split(" ")
-    pattern = r"(?<![A-Za-z0-9_])" + r"\s+".join(re.escape(word) for word in words) + r"(?![A-Za-z0-9_])"
-    return re.search(pattern, str(text or ""), flags=re.IGNORECASE) is not None
-
 
 
 def tokenize(text: str) -> list[str]:
@@ -104,287 +82,11 @@ def keyword_score(query: str, text: str, source: str = "", exact_phrases: list[s
 
     exact_bonus = 0.0
     for phrase in exact_phrases or []:
-        if exact_phrase_in_text(haystack_text, phrase):
+        clean_phrase = normalize_text(phrase)
+        if clean_phrase and clean_phrase in haystack_text:
             exact_bonus = max(exact_bonus, 1.0)
 
     return round(min(1.0, (0.70 * overlap) + (0.30 * exact_bonus)), 6)
-
-
-def _extract_matching_snippet(text: str, phrase: str, radius: int = 260) -> str:
-    raw = str(text or "")
-    clean_raw = re.sub(r"\s+", " ", raw)
-    clean_phrase = re.sub(r"\s+", " ", phrase or "").strip()
-
-    if not clean_raw or not clean_phrase:
-        return clean_raw[: radius * 2].strip()
-
-    idx = clean_raw.lower().find(clean_phrase.lower())
-    if idx < 0:
-        return clean_raw[: radius * 2].strip()
-
-    start = max(0, idx - radius)
-    end = min(len(clean_raw), idx + len(clean_phrase) + radius)
-
-    # Prefer sentence-ish boundary where possible.
-    left = clean_raw.rfind(". ", 0, idx)
-    if left >= 0 and idx - left < radius:
-        start = left + 2
-
-    right_candidates = [
-        pos for pos in [
-            clean_raw.find(". ", idx + len(clean_phrase)),
-            clean_raw.find("\n", idx + len(clean_phrase)),
-        ]
-        if pos >= 0
-    ]
-    if right_candidates:
-        right = min(right_candidates)
-        if right - idx < radius:
-            end = right + 1
-
-    snippet = clean_raw[start:end].strip()
-    if start > 0:
-        snippet = "... " + snippet
-    if end < len(clean_raw):
-        snippet = snippet + " ..."
-    return snippet
-
-
-def _verify_exact_phrase_hit(hit: dict[str, Any], exact_phrases: list[str]) -> dict[str, Any] | None:
-    text = str(hit.get("text") or "")
-
-    for phrase in exact_phrases:
-        if exact_phrase_in_text(text, phrase):
-            item = dict(hit)
-            item["exact_phrase_verified"] = True
-            item["matching_phrase"] = phrase
-            item["matching_snippet"] = _extract_matching_snippet(text, phrase)
-            item["score"] = max(normalize_score(item.get("score", 0.0)), 0.95)
-            item["retrieval_channel"] = item.get("retrieval_channel") or "exact_phrase"
-            return item
-
-    return None
-
-
-def _candidate_source_ids(
-    *,
-    source_id: str | None,
-    source_type: str | None,
-    file_type: str | None,
-    allowed_source_ids: list[str] | None,
-) -> list[str]:
-    if source_id:
-        return [source_id]
-
-    db = MetadataDB()
-    records = db.list_active_files(source_type=source_type)
-
-    allowed = None
-    if allowed_source_ids is not None:
-        allowed = {str(item).strip() for item in allowed_source_ids if str(item).strip()}
-        if not allowed:
-            return []
-
-    source_ids: list[str] = []
-    for record in records:
-        sid = str(record.get("source_id") or "").strip()
-        if not sid:
-            continue
-        if allowed is not None and sid not in allowed:
-            continue
-        if file_type and str(record.get("file_type") or "") != file_type:
-            continue
-
-        source_ids.append(sid)
-        if len(source_ids) >= MAX_KEYWORD_SCAN_SOURCES:
-            break
-
-    return source_ids
-
-
-def _scan_sources_for_exact_phrase(
-    *,
-    exact_phrases: list[str],
-    source_id: str | None,
-    source_type: str | None,
-    file_type: str | None,
-    allowed_source_ids: list[str] | None,
-) -> list[dict[str, Any]]:
-    source_ids = _candidate_source_ids(
-        source_id=source_id,
-        source_type=source_type,
-        file_type=file_type,
-        allowed_source_ids=allowed_source_ids,
-    )
-
-    verified: list[dict[str, Any]] = []
-
-    for sid in source_ids:
-        chunks = get_chunks_by_source_id(sid)
-        for chunk in chunks[:EXACT_PHRASE_SCAN_LIMIT_PER_SOURCE]:
-            item = _verify_exact_phrase_hit(chunk, exact_phrases)
-            if item:
-                item["retrieval_channel"] = "exact_phrase_scan"
-                verified.append(item)
-
-    verified = dedupe_hits(verified)
-    verified.sort(
-        key=lambda item: (
-            str(item.get("source") or ""),
-            int(item.get("chunk_index") or 0),
-            -normalize_score(item.get("score", 0.0)),
-        )
-    )
-    return verified
-
-
-
-SECTION_REF_RE = re.compile(
-    r"\b(?P<name>[A-Z][A-Za-z0-9_-]{2,50}|chapter|section|part|book|clause|article)\s+(?P<number>\d{1,4})\b",
-    re.IGNORECASE,
-)
-
-SECTION_REF_STOP_NAMES = {
-    "what", "where", "when", "which", "who", "why", "how",
-    "find", "show", "give", "tell", "explain", "compare",
-}
-
-
-def _extract_section_references(query: str) -> list[dict[str, str]]:
-    refs: list[dict[str, str]] = []
-
-    for match in SECTION_REF_RE.finditer(query or ""):
-        name = str(match.group("name") or "").strip()
-        number = str(match.group("number") or "").strip()
-
-        if not name or not number:
-            continue
-
-        if name.lower() in SECTION_REF_STOP_NAMES:
-            continue
-
-        refs.append(
-            {
-                "name": name,
-                "number": number,
-                "label": f"{name} {number}",
-            }
-        )
-
-    return refs[:4]
-
-
-def _section_ref_in_text(text: str, ref: dict[str, str]) -> bool:
-    raw = str(text or "")
-    name = re.escape(ref["name"])
-    number = re.escape(ref["number"])
-
-    patterns = [
-        rf"(?<![A-Za-z0-9_]){name}\s+{number}\s*:",
-        rf"(?<![A-Za-z0-9_]){name}\s+{number}\b",
-        rf"(?<![A-Za-z0-9_])chapter\s+{number}\b",
-        rf"(?<![A-Za-z0-9_])section\s+{number}\b",
-        rf"(?<![A-Za-z0-9_]){number}\s*:\s*1\b",
-    ]
-
-    # The last pattern alone is too broad. Only allow it if the named section
-    # appears near the same chunk. This helps book/chapter texts like Genesis 1:1.
-    name_present = re.search(rf"(?<![A-Za-z0-9_]){name}(?![A-Za-z0-9_])", raw, flags=re.IGNORECASE) is not None
-
-    for idx, pattern in enumerate(patterns):
-        if idx == len(patterns) - 1 and not name_present:
-            continue
-        if re.search(pattern, raw, flags=re.IGNORECASE):
-            return True
-
-    return False
-
-
-def _section_matching_snippet(text: str, ref: dict[str, str], radius: int = 1100) -> str:
-    raw = re.sub(r"\s+", " ", str(text or "").strip())
-    if not raw:
-        return ""
-
-    candidates = [
-        f"{ref['name']} {ref['number']}:",
-        f"{ref['name']} {ref['number']}",
-        f"{ref['number']}:1",
-    ]
-
-    lower = raw.lower()
-    positions = [lower.find(item.lower()) for item in candidates if lower.find(item.lower()) >= 0]
-    if not positions:
-        return raw[: min(len(raw), radius)].strip()
-
-    idx = min(positions)
-    start = max(0, idx - 120)
-    end = min(len(raw), idx + radius)
-
-    snippet = raw[start:end].strip()
-    if start > 0:
-        snippet = "... " + snippet
-    if end < len(raw):
-        snippet += " ..."
-    return snippet
-
-
-def _scan_sources_for_section_reference(
-    *,
-    query: str,
-    limit: int,
-    source_id: str | None,
-    source_type: str | None,
-    file_type: str | None,
-    allowed_source_ids: list[str] | None,
-) -> list[dict[str, Any]]:
-    refs = _extract_section_references(query)
-    if not refs:
-        return []
-
-    source_ids = _candidate_source_ids(
-        source_id=source_id,
-        source_type=source_type,
-        file_type=file_type,
-        allowed_source_ids=allowed_source_ids,
-    )
-
-    hits: list[dict[str, Any]] = []
-
-    for sid in source_ids:
-        chunks = get_chunks_by_source_id(sid)
-
-        for chunk in chunks[:EXACT_PHRASE_SCAN_LIMIT_PER_SOURCE]:
-            for ref in refs:
-                if not _section_ref_in_text(chunk.get("text", ""), ref):
-                    continue
-
-                item = dict(chunk)
-                item["retrieval_channel"] = "section_reference_scan"
-                item["retrieval_mode"] = "section_retrieval"
-                item["query_shape"] = "section_summary"
-                item["section_reference"] = ref["label"]
-                item["matching_snippet"] = _section_matching_snippet(item.get("text", ""), ref)
-                item["score"] = max(normalize_score(item.get("score", 0.0)), 0.96)
-
-                # Prefer exact named section references over generic chapter number matches.
-                text_lower = str(item.get("text", "")).lower()
-                label_lower = ref["label"].lower()
-                if label_lower in text_lower or f"{label_lower}:" in text_lower:
-                    item["score"] = 0.99
-
-                hits.append(item)
-                break
-
-    hits = dedupe_hits(hits)
-    hits.sort(
-        key=lambda item: (
-            -normalize_score(item.get("score", 0.0)),
-            str(item.get("source") or ""),
-            int(item.get("chunk_index") or 0),
-        )
-    )
-    return hits[:limit]
-
 
 
 def multi_query_vector_search(
@@ -434,6 +136,48 @@ def multi_query_vector_search(
     return dedupe_hits(all_hits)
 
 
+def _source_allowed(source_id: str, allowed_source_ids: list[str] | None) -> bool:
+    if allowed_source_ids is None:
+        return True
+    clean = {str(item).strip() for item in allowed_source_ids if str(item).strip()}
+    return source_id in clean
+
+
+def _candidate_source_ids(
+    *,
+    source_id: str | None,
+    source_type: str | None,
+    file_type: str | None,
+    allowed_source_ids: list[str] | None,
+) -> list[str]:
+    if source_id:
+        return [source_id] if _source_allowed(source_id, allowed_source_ids) else []
+
+    db = MetadataDB()
+    records = db.list_active_files(
+        source_type=source_type,
+    )
+
+    source_ids: list[str] = []
+    for record in records:
+        sid = str(record.get("source_id") or "").strip()
+        if not sid:
+            continue
+
+        if allowed_source_ids is not None and not _source_allowed(sid, allowed_source_ids):
+            continue
+
+        if file_type and str(record.get("file_type") or "") != file_type:
+            continue
+
+        source_ids.append(sid)
+
+        if len(source_ids) >= MAX_KEYWORD_SCAN_SOURCES:
+            break
+
+    return source_ids
+
+
 def keyword_search(
     *,
     query: str,
@@ -447,8 +191,15 @@ def keyword_search(
     allowed_source_ids: list[str] | None,
     exact_phrases: list[str] | None,
 ) -> list[dict[str, Any]]:
+    """
+    Fast keyword search using SQLite FTS5.
+
+    Old behaviour scanned all chunks manually in Python.
+    New behaviour asks SQLite FTS5 for matching chunks first.
+    """
     scored: list[dict[str, Any]] = []
 
+    # Search each rewritten query. This helps comparison/entity queries.
     for retrieval_query in queries:
         fts_hits = search_keyword_index(
             query=retrieval_query,
@@ -472,6 +223,8 @@ def keyword_search(
                 source_path,
                 exact_phrases=exact_phrases,
             )
+
+            # FTS found the row, so do not let lexical scoring collapse to zero.
             lexical_score = max(lexical_score, normalize_score(hit.get("score", 0.0)))
 
             item = dict(hit)
@@ -508,7 +261,7 @@ def source_cluster_scores(hits: list[dict[str, Any]]) -> dict[str, float]:
         avg_top = sum(top_scores) / max(len(top_scores), 1)
         max_score = max(item_scores) if item_scores else 0.0
         count_bonus = min(len(items), 6) * 0.025
-        keyword_bonus = 0.04 if any(str(item.get("retrieval_channel", "")).startswith("fts") for item in items) else 0.0
+        keyword_bonus = 0.04 if any(item.get("retrieval_channel") == "keyword" for item in items) else 0.0
 
         scores[sid] = round((0.62 * avg_top) + (0.26 * max_score) + count_bonus + keyword_bonus, 6)
 
@@ -645,73 +398,6 @@ def expand_neighbour_chunks(hits: list[dict[str, Any]], neighbour_window: int) -
     return merged
 
 
-def _exact_phrase_retrieve(
-    *,
-    query: str,
-    exact_phrases: list[str],
-    limit: int,
-    source_id: str | None,
-    source_type: str | None,
-    file_type: str | None,
-    page_start: int | None,
-    page_end: int | None,
-    allowed_source_ids: list[str] | None,
-) -> list[dict[str, Any]]:
-    keyword_hits = keyword_search(
-        query=query,
-        queries=[query],
-        keyword_top_k=max(50, limit * 10),
-        source_id=source_id,
-        source_type=source_type,
-        file_type=file_type,
-        page_start=page_start,
-        page_end=page_end,
-        allowed_source_ids=allowed_source_ids,
-        exact_phrases=exact_phrases,
-    )
-
-    verified: list[dict[str, Any]] = []
-    for hit in keyword_hits:
-        item = _verify_exact_phrase_hit(hit, exact_phrases)
-        if item:
-            verified.append(item)
-
-    # FTS can miss good matches when chunks are large or tokenisation is noisy.
-    # For exact phrase mode, correctness beats clever ranking.
-    scanned = _scan_sources_for_exact_phrase(
-        exact_phrases=exact_phrases,
-        source_id=source_id,
-        source_type=source_type,
-        file_type=file_type,
-        allowed_source_ids=allowed_source_ids,
-    )
-    verified.extend(scanned)
-
-    verified = dedupe_hits(verified)
-
-    # For exact phrase lookup, source order + chunk order is usually more useful than BM25 noise.
-    verified.sort(
-        key=lambda item: (
-            str(item.get("source") or ""),
-            int(item.get("chunk_index") or 0),
-            -normalize_score(item.get("score", 0.0)),
-        )
-    )
-
-    final_hits = verified[:limit]
-    for hit in final_hits:
-        hit["adaptive_retrieval"] = True
-        hit["retrieval_mode"] = "exact_phrase_search"
-        hit["retrieval_speed"] = "direct"
-        hit["retriever_used"] = "FTS5 + exact scan"
-        hit["query_shape"] = "exact_phrase"
-        hit["reranker_used"] = False
-        hit["neighbour_window"] = 0
-        hit["retrieval_planner_reason"] = "Exact phrase retrieval verified the phrase exists in each returned chunk."
-
-    return final_hits
-
-
 def adaptive_hybrid_retrieve(
     *,
     query: str,
@@ -737,46 +423,6 @@ def adaptive_hybrid_retrieve(
         queries.insert(0, query)
     queries = queries[:5]
 
-    exact_phrases = [
-        str(item or "").strip()
-        for item in (retrieval_plan.get("exact_phrases") or [])
-        if str(item or "").strip()
-    ]
-
-    if retrieval_plan.get("retrieval_mode") == "exact_phrase_search" and exact_phrases:
-        return _exact_phrase_retrieve(
-            query=query,
-            exact_phrases=exact_phrases,
-            limit=safe_limit,
-            source_id=source_id,
-            source_type=source_type,
-            file_type=file_type,
-            page_start=page_start,
-            page_end=page_end,
-            allowed_source_ids=allowed_source_ids,
-        )
-
-    if retrieval_plan.get("retrieval_mode") in {"section_retrieval", "section_topic_retrieval"}:
-        section_hits = _scan_sources_for_section_reference(
-            query=query,
-            limit=max(safe_limit, int(retrieval_plan.get("final_top_k", safe_limit) or safe_limit)),
-            source_id=source_id,
-            source_type=source_type,
-            file_type=file_type,
-            allowed_source_ids=allowed_source_ids,
-        )
-        if section_hits:
-            for hit in section_hits:
-                hit["adaptive_retrieval"] = True
-                hit["retrieval_mode"] = "section_retrieval"
-                hit["retrieval_speed"] = retrieval_plan.get("retrieval_speed", "normal")
-                hit["retriever_used"] = "section scan + Qdrant payload"
-                hit["query_shape"] = "section_summary"
-                hit["reranker_used"] = False
-                hit["neighbour_window"] = 0
-                hit["retrieval_planner_reason"] = "Section reference scan anchored retrieval to the named chapter/section."
-            return section_hits[:safe_limit]
-
     candidate_top_k = max(safe_limit * 5, int(retrieval_plan.get("candidate_top_k", 40) or 40))
     candidate_top_k = max(10, min(candidate_top_k, 100))
 
@@ -790,6 +436,8 @@ def adaptive_hybrid_retrieve(
     use_vector = bool(retrieval_plan.get("use_vector_search", True))
     use_keyword = bool(retrieval_plan.get("use_keyword_search", False))
     use_reranker = bool(retrieval_plan.get("use_reranker", True))
+
+    exact_phrases = retrieval_plan.get("exact_phrases") or []
 
     all_hits: list[dict[str, Any]] = []
 
