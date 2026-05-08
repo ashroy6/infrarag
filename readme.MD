@@ -3,7 +3,7 @@
 InfraRAG is a private, local-first Retrieval-Augmented Generation system for DevOps, cloud, Terraform, runbooks, code repositories, PDFs, DOCX files, and internal engineering knowledge bases.
 
 It is designed as a production-style private AI assistant that can ingest engineering documents, retrieve relevant evidence, rerank context, route questions to the right answer pipeline, generate grounded answers with citations, build a knowledge graph for source inspection, stream responses, and keep an audit trail of what was asked and answered.
-gameing
+
 ---
 
 ## Index
