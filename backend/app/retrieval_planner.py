@@ -364,12 +364,27 @@ def _looks_like_source_navigation(q: str) -> bool:
     return any(marker in clean for marker in SOURCE_NAVIGATION_MARKERS)
 
 
+def _clean_comparison_entity(value: str) -> str:
+    item = _clean_query(str(value or "").strip(" ?.,:;\"'"))
+    item = re.sub(r"\b(the|a|an)\b", " ", item, flags=re.IGNORECASE)
+    item = re.sub(
+        r"\b(according to|in|inside|from|within|for|of|on|at)\b.*$",
+        " ",
+        item,
+        flags=re.IGNORECASE,
+    )
+    item = _clean_query(item.strip(" ?.,:;\"'"))
+    return item
+
+
 def _extract_comparison_entities(query: str) -> list[str]:
     text = _clean_query(query)
 
     patterns = [
         r"\bcompare\s+(.+?)\s+(?:and|with|vs|versus)\s+(.+?)(?:\?|$)",
         r"\bdifference(?:s)?\s+between\s+(.+?)\s+and\s+(.+?)(?:\?|$)",
+        r"\bdifference\s+between\s+(.+?)\s+and\s+(.+?)(?:\?|$)",
+        r"\bexplain\s+the\s+difference\s+between\s+(.+?)\s+and\s+(.+?)(?:\?|$)",
         r"\b(.+?)\s+vs\s+(.+?)(?:\?|$)",
     ]
 
@@ -380,10 +395,10 @@ def _extract_comparison_entities(query: str) -> list[str]:
 
         entities = []
         for group in match.groups():
-            item = re.sub(r"\b(the|a|an)\b", " ", group, flags=re.IGNORECASE)
-            item = _clean_query(item.strip(" ?.,:;"))
+            item = _clean_comparison_entity(group)
             if item:
                 entities.append(item)
+
         if len(entities) >= 2:
             return entities[:2]
 
@@ -586,7 +601,15 @@ def build_adaptive_retrieval_plan(
 
     if _looks_like_comparison(clean_query) or question_type == "comparison":
         entities = _extract_comparison_entities(clean_query)
-        rewritten = [clean_query] + entities if entities else [clean_query]
+        rewritten = [clean_query]
+        if len(entities) >= 2:
+            rewritten.extend([
+                f"{entities[0]} {entities[1]}",
+                entities[0],
+                entities[1],
+            ])
+        elif entities:
+            rewritten.extend(entities)
         plan.update(
             {
                 "query_shape": "comparison",

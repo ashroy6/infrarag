@@ -35,6 +35,69 @@ def normalize_question(question: str) -> str:
     return re.sub(r"\s+", " ", (question or "").strip())
 
 
+
+
+def _answer_terms(value: str) -> set[str]:
+    stop = {
+        "a", "an", "the", "is", "are", "was", "were", "what", "which", "who",
+        "where", "when", "how", "why", "does", "do", "did", "this", "that",
+        "book", "document", "file", "say", "says", "about", "from", "in",
+        "according", "to", "of", "and", "or", "me", "tell", "explain",
+        "difference", "compare", "between",
+    }
+    return {
+        t.lower()
+        for t in re.findall(r"[A-Za-z][A-Za-z0-9_+-]{2,}", value or "")
+        if t.lower() not in stop
+    }
+
+
+def _safe_to_replace_with_verifier_answer(
+    *,
+    question: str,
+    draft_answer: str,
+    corrected_answer: str,
+    verifier_verdict: str,
+) -> bool:
+    """
+    Prevent verifier corruption.
+
+    The verifier may flag issues, but it must not replace an answer with
+    unrelated text. The corrected answer must still overlap with important
+    question terms and must not be a tiny unrelated fragment.
+    """
+    corrected = (corrected_answer or "").strip()
+    draft = (draft_answer or "").strip()
+
+    if verifier_verdict not in {"needs_revision", "insufficient_evidence"}:
+        return False
+
+    if not corrected or corrected == draft:
+        return False
+
+    if corrected == "No evidence found in the knowledge base.":
+        return True
+
+    q_terms = _answer_terms(question)
+    if q_terms:
+        corrected_terms = _answer_terms(corrected)
+        if not (q_terms & corrected_terms):
+            return False
+
+    if len(draft.split()) >= 20 and len(corrected.split()) < 8:
+        return False
+
+    generic_bad = (
+        "please ask a narrower question",
+        "retrieved evidence is insufficient",
+        "draft answer contained claims",
+    )
+    lowered = corrected.lower()
+    if any(x in lowered for x in generic_bad) and len(draft.split()) >= 20:
+        return False
+
+    return True
+
 def _run_selected_pipeline(
     pipeline_used: str,
     question: str,
@@ -166,10 +229,32 @@ def run_ask(
         ).inc()
 
         # Important:
-        # If verifier says the draft is valid, keep the original detailed draft.
-        # Only replace the answer when verifier says revision/insufficient evidence.
-        if verifier_verdict in {"needs_revision", "insufficient_evidence"}:
-            answer = verification_result.get("corrected_answer", answer)
+        # Verifier is allowed to flag, but it must not replace a good answer
+        # with unrelated text. This prevents failures like yama/niyama becoming
+        # an unrelated samyama/celestial-beings answer.
+        corrected_answer = str(verification_result.get("corrected_answer") or "").strip()
+
+        # Comparison answers are especially easy for the verifier to damage:
+        # it may replace a structured comparison with a narrow fragment.
+        # For comparison retrieval, keep the draft unless the verifier says
+        # explicit no-evidence.
+        if result.get("query_shape") == "comparison" and corrected_answer != "No evidence found in the knowledge base.":
+            verification_result["verification_reason"] = (
+                str(verification_result.get("verification_reason") or "")
+                + " Verifier correction was ignored for comparison answer to avoid unbalanced rewrite."
+            )[:500]
+        elif _safe_to_replace_with_verifier_answer(
+            question=normalized_question,
+            draft_answer=answer,
+            corrected_answer=corrected_answer,
+            verifier_verdict=str(verifier_verdict or ""),
+        ):
+            answer = corrected_answer
+        elif verifier_verdict in {"needs_revision", "insufficient_evidence"}:
+            verification_result["verification_reason"] = (
+                str(verification_result.get("verification_reason") or "")
+                + " Verifier correction was rejected because it did not safely overlap with the question."
+            )[:500]
 
         if answer.strip() == "No evidence found in the knowledge base.":
             citations = []

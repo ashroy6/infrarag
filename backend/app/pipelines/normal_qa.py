@@ -19,6 +19,81 @@ NORMAL_QA_NUM_PREDICT = int(os.getenv("NORMAL_QA_NUM_PREDICT", "500"))
 QUOTE_RE = re.compile(r'"([^"]+)"|\'([^\']+)\'')
 
 
+def _chunk_meta(chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    if not chunks:
+        return {
+            "retriever_used": None,
+            "retrieval_mode": None,
+            "query_shape": None,
+            "reranker_used": None,
+            "retrieval_speed": None,
+            "primary_entity": None,
+        }
+
+    first = chunks[0]
+    return {
+        "retriever_used": first.get("retriever_used"),
+        "retrieval_mode": first.get("retrieval_mode"),
+        "query_shape": first.get("query_shape"),
+        "reranker_used": first.get("reranker_used"),
+        "retrieval_speed": first.get("retrieval_speed"),
+        "primary_entity": first.get("primary_entity"),
+    }
+
+
+def _important_query_terms(question: str) -> set[str]:
+    stop = {
+        "a", "an", "the", "is", "are", "was", "were", "what", "which", "who",
+        "where", "when", "how", "why", "does", "do", "did", "this", "that",
+        "book", "document", "file", "say", "says", "about", "from", "in",
+        "according", "to", "of", "and", "or", "me", "tell", "explain",
+    }
+    terms = re.findall(r"[A-Za-z][A-Za-z0-9_+-]{2,}", question or "")
+    return {t.lower() for t in terms if t.lower() not in stop}
+
+
+def _retrieval_looks_like_noise(question: str, chunks: list[dict[str, Any]]) -> bool:
+    """
+    Hard no-evidence guard.
+
+    If a query has an important rare/proper term and none of the retrieved chunks
+    contain it, do not send random context to the LLM.
+    """
+    if not chunks:
+        return True
+
+    terms = _important_query_terms(question)
+    if not terms:
+        return False
+
+    joined = "\n".join(str(c.get("text") or "") for c in chunks).lower()
+    source_joined = "\n".join(str(c.get("source") or "") for c in chunks).lower()
+    haystack = joined + "\n" + source_joined
+
+    matched = {term for term in terms if re.search(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])", haystack)}
+
+    # For a one-term query like Kubernetes, exact absence means no evidence.
+    if len(terms) == 1 and not matched:
+        return True
+
+    # For multi-term queries, require at least one meaningful term in evidence.
+    if not matched:
+        return True
+
+    scores = [float(c.get("score", 0.0) or 0.0) for c in chunks]
+    if len(scores) >= 4:
+        spread = max(scores) - min(scores)
+        # Flat mid scores usually mean vector fallback noise.
+        if spread < 0.01 and max(scores) < 0.60 and len(matched) < max(1, len(terms) // 2):
+            return True
+
+    return False
+
+
+def _with_meta(payload: dict[str, Any], chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    return {**payload, **_chunk_meta(chunks)}
+
+
 def _quoted_phrases(question: str) -> list[str]:
     phrases: list[str] = []
     for match in QUOTE_RE.finditer(question or ""):
@@ -138,14 +213,17 @@ def run(
     )
 
     if not chunks:
-        return no_evidence_response()
+        return _with_meta(no_evidence_response(), chunks)
 
     if _is_exact_phrase_result(question, chunks):
         return _direct_exact_phrase_answer(question, chunks)
 
+    if _retrieval_looks_like_noise(question, chunks):
+        return _with_meta(no_evidence_response(), chunks)
+
     top_score = max(float(c.get("score", 0.0) or 0.0) for c in chunks)
     if top_score < MIN_SCORE_THRESHOLD:
-        return no_evidence_response()
+        return _with_meta(no_evidence_response(), chunks)
 
     compacted = compact_chunks(chunks, max_total_chars=7000)
     citations = build_citations(compacted)
@@ -220,6 +298,7 @@ def run(
             "unsupported_claims": [],
             "verification_reason": "Model returned no-evidence despite retrieved citations.",
             "verified": False,
+            **_chunk_meta(compacted),
         }
 
     if answer_denies_evidence(answer, citations) and citations:
@@ -234,18 +313,20 @@ def run(
             "unsupported_claims": [],
             "verification_reason": "Model denied evidence despite retrieved citations.",
             "verified": False,
+            **_chunk_meta(compacted),
         }
 
     if answer.strip() == "No evidence found in the knowledge base.":
-        return no_evidence_response()
+        return _with_meta(no_evidence_response(), chunks)
 
     if answer_denies_evidence(answer, citations):
-        return no_evidence_response()
+        return _with_meta(no_evidence_response(), chunks)
 
     return {
         "answer": answer,
         "citations": citations,
         "verification_context_text": context_text,
         "source_resolution": source_resolution,
+        **_chunk_meta(compacted),
         **verification_result,
     }

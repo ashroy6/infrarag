@@ -27,6 +27,8 @@ EXACT_PHRASE_SCAN_LIMIT_PER_SOURCE = int(os.getenv("EXACT_PHRASE_SCAN_LIMIT_PER_
 
 ENTITY_SCAN_LIMIT_PER_SOURCE = int(os.getenv("ENTITY_SCAN_LIMIT_PER_SOURCE", "2500"))
 ENTITY_MAX_SCAN_SOURCES = int(os.getenv("ENTITY_MAX_SCAN_SOURCES", "80"))
+COMPARISON_ENTITY_SCAN_LIMIT_PER_SOURCE = int(os.getenv("COMPARISON_ENTITY_SCAN_LIMIT_PER_SOURCE", "2500"))
+COMPARISON_ENTITY_MAX_SCAN_SOURCES = int(os.getenv("COMPARISON_ENTITY_MAX_SCAN_SOURCES", "80"))
 
 ENTITY_IDENTITY_PATTERNS = (
     r"\b{entity}\s+is\s+(?:a|an|the)?\b",
@@ -53,6 +55,28 @@ ENTITY_NOISE_PATTERNS = (
     r"\bgithub\s+issue\b",
     r"\bpull\s+request\b",
     r"\bcommit\b",
+)
+
+BIOGRAPHY_IDENTITY_PATTERNS = (
+    r"\bwho\s+(?:is|was)\b",
+    r"\blittle\s+is\s+known\b",
+    r"\bknown\s+about\b",
+    r"\bwas\s+(?:a|an|the)\b",
+    r"\bis\s+(?:a|an|the)\b",
+    r"\bauthor\b",
+    r"\bwrote\b",
+    r"\bwritten\s+by\b",
+    r"\bcompiler\b",
+    r"\bcommentator\b",
+    r"\btranslator\b",
+    r"\bteacher\b",
+    r"\bfounder\b",
+    r"\bphilosopher\b",
+    r"\bgrammarian\b",
+    r"\bscholar\b",
+    r"\bdate\b",
+    r"\blived\b",
+    r"\bborn\b",
 )
 
 
@@ -218,6 +242,50 @@ def _entity_source_prior(hit: dict[str, Any]) -> float:
     if kind == "finance":
         return -0.04
     return 0.0
+
+
+def _looks_like_biographical_question(query: str) -> bool:
+    clean = normalize_text(query)
+    return bool(re.search(r"^who\s+(?:is|was)\s+", clean))
+
+
+def _biography_identity_boost(text: str, query: str) -> tuple[float, list[str]]:
+    if not _looks_like_biographical_question(query):
+        return 0.0, []
+
+    raw = str(text or "")
+    reasons: list[str] = []
+    boost = 0.0
+
+    for pattern in BIOGRAPHY_IDENTITY_PATTERNS:
+        if re.search(pattern, raw, flags=re.IGNORECASE):
+            boost += 0.08
+            reasons.append("biography_identity_pattern")
+            break
+
+    # Foreword/introduction chunks often contain author identity context.
+    if re.search(r"\b(foreword|introduction|preface|translator|author|sutras?)\b", raw, flags=re.IGNORECASE):
+        boost += 0.08
+        reasons.append("intro_author_context")
+
+    return min(boost, 0.18), reasons
+
+
+def _score_entity_hit_with_query(hit: dict[str, Any], entity: str, query: str) -> dict[str, Any] | None:
+    item = _score_entity_hit(hit, entity)
+    if not item:
+        return None
+
+    bio_boost, bio_reasons = _biography_identity_boost(str(item.get("text") or ""), query)
+    if bio_boost:
+        item["score"] = round(min(1.0, normalize_score(item.get("score", 0.0)) + bio_boost), 6)
+        item["pre_cluster_score"] = item["score"]
+        reasons = list(item.get("entity_score_reasons") or [])
+        reasons.extend(bio_reasons)
+        item["entity_score_reasons"] = reasons
+        item["biography_identity_boost"] = bio_boost
+
+    return item
 
 
 def _score_entity_hit(hit: dict[str, Any], entity: str) -> dict[str, Any] | None:
@@ -960,7 +1028,7 @@ def _entity_lookup_retrieve(
 
     scored_hits: list[dict[str, Any]] = []
     for hit in keyword_hits:
-        scored = _score_entity_hit(hit, entity)
+        scored = _score_entity_hit_with_query(hit, entity, query)
         if scored:
             scored["retrieval_channel"] = hit.get("retrieval_channel") or "entity_fts"
             scored_hits.append(scored)
@@ -993,7 +1061,7 @@ def _entity_lookup_retrieve(
             allowed_source_ids=allowed_source_ids,
         )
         for hit in vector_hits:
-            scored = _score_entity_hit(hit, entity)
+            scored = _score_entity_hit_with_query(hit, entity, query)
             if scored:
                 scored["retrieval_channel"] = "entity_vector"
                 # Demote vector-only short-name matches unless they have identity evidence.
@@ -1023,7 +1091,7 @@ def _entity_lookup_retrieve(
 
         rescored: list[dict[str, Any]] = []
         for hit in pre_rerank:
-            scored = _score_entity_hit(hit, entity)
+            scored = _score_entity_hit_with_query(hit, entity, query)
             if scored:
                 scored["retrieval_channel"] = hit.get("retrieval_channel") or "entity_neighbour"
                 rescored.append(scored)
@@ -1081,6 +1149,417 @@ def _entity_lookup_retrieve(
     return final_hits
 
 
+
+
+def _comparison_score_hit(hit: dict[str, Any], entities: list[str]) -> dict[str, Any] | None:
+    if len(entities) < 2:
+        return None
+
+    text = str(hit.get("text") or "")
+    source = str(hit.get("source") or "")
+    haystack = f"{source}\n{text}"
+
+    present = [
+        ent for ent in entities
+        if _entity_word_match(haystack, ent)
+    ]
+
+    if not present:
+        return None
+
+    item = dict(hit)
+    lexical = max(
+        keyword_score(" ".join(entities), text, source),
+        normalize_score(item.get("keyword_score", 0.0)),
+        normalize_score(item.get("lexical_score", 0.0)),
+    )
+    vector = normalize_score(item.get("vector_score", item.get("score", 0.0)))
+
+    both_bonus = 0.35 if len(present) >= 2 else 0.0
+    single_bonus = 0.12 if len(present) == 1 else 0.0
+    proximity_bonus = 0.0
+
+    if len(present) >= 2:
+        lowered = haystack.lower()
+        positions = []
+        for ent in entities[:2]:
+            idx = lowered.find(ent.lower())
+            if idx >= 0:
+                positions.append(idx)
+        if len(positions) == 2 and abs(positions[0] - positions[1]) <= 1200:
+            proximity_bonus = 0.15
+
+    final = (0.45 * lexical) + (0.20 * vector) + both_bonus + single_bonus + proximity_bonus
+
+    item["comparison_entities"] = entities
+    item["comparison_present_entities"] = present
+    item["comparison_both_entities"] = len(present) >= 2
+    item["keyword_score"] = lexical
+    item["lexical_score"] = lexical
+    item["vector_score"] = vector
+    item["pre_cluster_score"] = round(max(0.0, min(final, 1.0)), 6)
+    item["score"] = item["pre_cluster_score"]
+    item["retrieval_channel"] = item.get("retrieval_channel") or "comparison"
+
+    return item
+
+
+def _entity_presence_counts(hits: list[dict[str, Any]], entities: list[str]) -> dict[str, int]:
+    counts = {entity: 0 for entity in entities[:2]}
+    for hit in hits:
+        present = set(hit.get("comparison_present_entities") or [])
+        for entity in counts:
+            if entity in present:
+                counts[entity] += 1
+    return counts
+
+
+def _rescore_comparison_after_rerank(hit: dict[str, Any]) -> dict[str, Any]:
+    item = dict(hit)
+    base = normalize_score(item.get("score", 0.0))
+    keyword = normalize_score(item.get("keyword_score", 0.0))
+    vector = normalize_score(item.get("vector_score", 0.0))
+
+    both_bonus = 0.18 if item.get("comparison_both_entities") else 0.0
+    single_bonus = 0.06 if item.get("comparison_present_entities") else 0.0
+
+    # Blend reranker/vector score with deterministic lexical/entity evidence.
+    item["score"] = round(
+        max(0.0, min(1.0, (0.50 * base) + (0.30 * keyword) + (0.10 * vector) + both_bonus + single_bonus)),
+        6,
+    )
+    return item
+
+
+def _force_balanced_comparison_hits(
+    *,
+    hits: list[dict[str, Any]],
+    entities: list[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """
+    Ensure comparison context contains evidence for both sides.
+
+    Generic behavior:
+    - Prefer chunks containing both compared entities.
+    - Force evidence for entity A.
+    - Force evidence for entity B.
+    - Fill the rest by score.
+    - Never allow one side to completely dominate when the other side exists.
+    """
+    if len(entities) < 2 or not hits:
+        return hits[:limit]
+
+    rescored = [_rescore_comparison_after_rerank(hit) for hit in hits]
+    rescored = dedupe_hits(rescored)
+
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+
+    entity_a, entity_b = entities[0], entities[1]
+    minimum_per_entity = 2 if limit >= 6 else 1
+    max_both_seed = min(3, max(1, limit // 3))
+
+    both = [h for h in rescored if h.get("comparison_both_entities")]
+    both.sort(
+        key=lambda h: (
+            normalize_score(h.get("keyword_score", 0.0)),
+            normalize_score(h.get("score", 0.0)),
+            normalize_score(h.get("vector_score", 0.0)),
+        ),
+        reverse=True,
+    )
+
+    # Seed with strongest chunks that mention both entities.
+    for hit in both[:max_both_seed]:
+        key = hit_key(hit)
+        if key not in seen:
+            seen.add(key)
+            selected.append(hit)
+
+    def add_for_entity(entity: str, needed: int) -> None:
+        nonlocal selected, seen
+
+        current = sum(
+            1
+            for h in selected
+            if entity in (h.get("comparison_present_entities") or [])
+        )
+
+        if current >= needed:
+            return
+
+        entity_hits = [
+            h for h in rescored
+            if entity in (h.get("comparison_present_entities") or [])
+        ]
+        entity_hits.sort(
+            key=lambda h: (
+                bool(h.get("comparison_both_entities")),
+                normalize_score(h.get("keyword_score", 0.0)),
+                normalize_score(h.get("score", 0.0)),
+                normalize_score(h.get("vector_score", 0.0)),
+            ),
+            reverse=True,
+        )
+
+        for hit in entity_hits:
+            if current >= needed:
+                break
+            key = hit_key(hit)
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(hit)
+            current += 1
+
+    # Force both sides if evidence exists.
+    add_for_entity(entity_a, minimum_per_entity)
+    add_for_entity(entity_b, minimum_per_entity)
+
+    # Fill remaining slots by balanced score.
+    for hit in sorted(
+        rescored,
+        key=lambda h: (
+            bool(h.get("comparison_both_entities")),
+            normalize_score(h.get("keyword_score", 0.0)),
+            normalize_score(h.get("score", 0.0)),
+            normalize_score(h.get("vector_score", 0.0)),
+        ),
+        reverse=True,
+    ):
+        if len(selected) >= limit:
+            break
+        key = hit_key(hit)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(hit)
+
+    selected = selected[:limit]
+
+    # Diagnostics for UI/API/debugging.
+    counts = _entity_presence_counts(selected, entities)
+    weak_entities = [entity for entity, count in counts.items() if count == 0]
+
+    for hit in selected:
+        hit["comparison_entity_counts"] = counts
+        hit["comparison_weak_entities"] = weak_entities
+        hit["comparison_balanced_context"] = not weak_entities
+
+    return selected
+
+
+
+def _scan_sources_for_comparison_entities(
+    *,
+    entities: list[str],
+    source_id: str | None,
+    source_type: str | None,
+    file_type: str | None,
+    allowed_source_ids: list[str] | None,
+) -> list[dict[str, Any]]:
+    """
+    Generic exact scan for comparison queries.
+
+    Purpose:
+    - If vector/FTS retrieval over-focuses on entity A, this scan forces
+      candidate evidence for entity B when it exists in the corpus.
+    - No domain-specific terms.
+    """
+    clean_entities = [str(e or "").strip() for e in entities if str(e or "").strip()]
+    if len(clean_entities) < 2:
+        return []
+
+    source_ids = _candidate_source_ids(
+        source_id=source_id,
+        source_type=source_type,
+        file_type=file_type,
+        allowed_source_ids=allowed_source_ids,
+    )[:COMPARISON_ENTITY_MAX_SCAN_SOURCES]
+
+    hits: list[dict[str, Any]] = []
+
+    for sid in source_ids:
+        chunks = get_chunks_by_source_id(sid)
+
+        for chunk in chunks[:COMPARISON_ENTITY_SCAN_LIMIT_PER_SOURCE]:
+            scored = _comparison_score_hit(chunk, clean_entities)
+            if not scored:
+                continue
+
+            scored["retrieval_channel"] = "comparison_exact_scan"
+            hits.append(scored)
+
+    hits = dedupe_hits(hits)
+    hits.sort(
+        key=lambda h: (
+            bool(h.get("comparison_both_entities")),
+            normalize_score(h.get("keyword_score", 0.0)),
+            normalize_score(h.get("score", 0.0)),
+        ),
+        reverse=True,
+    )
+    return hits
+
+
+def _comparison_retrieve(
+    *,
+    query: str,
+    retrieval_plan: dict[str, Any],
+    limit: int,
+    source_id: str | None,
+    source: str | None,
+    source_type: str | None,
+    file_type: str | None,
+    page_start: int | None,
+    page_end: int | None,
+    allowed_source_ids: list[str] | None,
+) -> list[dict[str, Any]]:
+    entities = [
+        str(item or "").strip()
+        for item in (retrieval_plan.get("comparison_entities") or [])
+        if str(item or "").strip()
+    ]
+
+    if len(entities) < 2:
+        return []
+
+    safe_limit = max(1, min(int(limit), 50))
+    queries = retrieval_plan.get("rewritten_queries") or [query, " ".join(entities), *entities]
+    queries = [
+        re.sub(r"\s+", " ", str(item or "").strip())
+        for item in queries
+        if str(item or "").strip()
+    ][:5]
+
+    all_hits: list[dict[str, Any]] = []
+
+    keyword_hits = keyword_search(
+        query=query,
+        queries=queries,
+        keyword_top_k=max(60, int(retrieval_plan.get("keyword_top_k", 60) or 60)),
+        source_id=source_id,
+        source_type=source_type,
+        file_type=file_type,
+        page_start=page_start,
+        page_end=page_end,
+        allowed_source_ids=allowed_source_ids,
+        exact_phrases=entities,
+    )
+
+    for hit in keyword_hits:
+        scored = _comparison_score_hit(hit, entities)
+        if scored:
+            scored["retrieval_channel"] = hit.get("retrieval_channel") or "comparison_fts"
+            all_hits.append(scored)
+
+    vector_hits = multi_query_vector_search(
+        queries=[" ".join(entities), *entities],
+        candidate_top_k=50,
+        source_id=source_id,
+        source=source,
+        source_type=source_type,
+        file_type=file_type,
+        page_start=page_start,
+        page_end=page_end,
+        allowed_source_ids=allowed_source_ids,
+    )
+
+    for hit in vector_hits:
+        scored = _comparison_score_hit(hit, entities)
+        if scored:
+            scored["retrieval_channel"] = "comparison_vector"
+            all_hits.append(scored)
+
+    scanned_hits = _scan_sources_for_comparison_entities(
+        entities=entities,
+        source_id=source_id,
+        source_type=source_type,
+        file_type=file_type,
+        allowed_source_ids=allowed_source_ids,
+    )
+    all_hits.extend(scanned_hits)
+
+    all_hits = dedupe_hits(all_hits)
+    if not all_hits:
+        return []
+
+    # Prefer chunks containing both entities, but keep some single-entity chunks
+    # so the answer can compare both sides.
+    both = [h for h in all_hits if h.get("comparison_both_entities")]
+    singles = [h for h in all_hits if not h.get("comparison_both_entities")]
+
+    both.sort(key=lambda h: normalize_score(h.get("score", 0.0)), reverse=True)
+    singles.sort(key=lambda h: normalize_score(h.get("score", 0.0)), reverse=True)
+
+    balanced: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+
+    for hit in both[: max(4, safe_limit)]:
+        key = hit_key(hit)
+        if key not in seen:
+            seen.add(key)
+            balanced.append(hit)
+
+    for ent in entities[:2]:
+        for hit in singles:
+            if ent not in hit.get("comparison_present_entities", []):
+                continue
+            key = hit_key(hit)
+            if key in seen:
+                continue
+            seen.add(key)
+            balanced.append(hit)
+            break
+
+    for hit in both + singles:
+        if len(balanced) >= max(safe_limit * 2, 10):
+            break
+        key = hit_key(hit)
+        if key in seen:
+            continue
+        seen.add(key)
+        balanced.append(hit)
+
+    neighbour_window = int(retrieval_plan.get("neighbour_window", 0) or 0)
+    if neighbour_window > 0:
+        balanced = expand_neighbour_chunks(balanced, neighbour_window=neighbour_window)
+
+    use_reranker = bool(retrieval_plan.get("use_reranker", True))
+    if use_reranker:
+        reranked = rerank_hits(
+            question=query,
+            hits=balanced,
+            top_n=max(safe_limit * 2, 10),
+        )
+    else:
+        reranked = sorted(
+            balanced,
+            key=lambda h: normalize_score(h.get("score", 0.0)),
+            reverse=True,
+        )
+
+    final_hits = _force_balanced_comparison_hits(
+        hits=reranked,
+        entities=entities,
+        limit=safe_limit,
+    )
+
+    for hit in final_hits:
+        hit["adaptive_retrieval"] = True
+        hit["retrieval_mode"] = "balanced_multi_entity_hybrid"
+        hit["retrieval_speed"] = retrieval_plan.get("retrieval_speed", "normal")
+        hit["retriever_used"] = "comparison FTS + Qdrant balanced entities"
+        hit["query_shape"] = "comparison"
+        hit["reranker_used"] = bool(use_reranker)
+        hit["neighbour_window"] = int(retrieval_plan.get("neighbour_window", 0) or 0)
+        hit["retrieval_planner_reason"] = retrieval_plan.get("planner_reason", "")
+        hit["comparison_entities"] = entities
+
+    return final_hits
+
+
 def adaptive_hybrid_retrieve(
     *,
     query: str,
@@ -1126,6 +1605,22 @@ def adaptive_hybrid_retrieve(
             page_end=page_end,
             allowed_source_ids=allowed_source_ids,
         )
+
+    if retrieval_mode == "balanced_multi_entity_hybrid" or retrieval_plan.get("query_shape") == "comparison":
+        comparison_hits = _comparison_retrieve(
+            query=query,
+            retrieval_plan=retrieval_plan,
+            limit=safe_limit,
+            source_id=source_id,
+            source=source,
+            source_type=source_type,
+            file_type=file_type,
+            page_start=page_start,
+            page_end=page_end,
+            allowed_source_ids=allowed_source_ids,
+        )
+        if comparison_hits:
+            return comparison_hits
 
     if retrieval_mode == "entity_lookup" or retrieval_plan.get("query_shape") in {"entity_lookup", "definition"}:
         entity_hits = _entity_lookup_retrieve(
