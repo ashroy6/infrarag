@@ -236,11 +236,10 @@ def should_verify_answer(
     if not answer.strip():
         return False
 
-    # Keep normal Q&A fast, but verify one important failure mode:
-    # retrieval found evidence, yet the model denies that evidence exists.
-    # This is generic and not hardcoded to any name/company/topic.
+    # Normal Q&A should stay fast and should not be blocked by the verifier.
+    # We will handle bad short answers with retrieval trace + targeted recovery later.
     if pipeline_used == "normal_qa":
-        return NORMAL_QA_DENIAL_VERIFIER_ENABLED and answer_denies_evidence(answer, citations)
+        return False
 
     if not VERIFY_COMPLEX_ANSWERS:
         return False

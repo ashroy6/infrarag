@@ -48,6 +48,25 @@ DOC_EXTENSIONS = {
     ".rst",
 }
 
+CODE_EXTENSIONS = {
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".tf",
+    ".sh",
+    ".sql",
+    ".yaml",
+    ".yml",
+    ".json",
+}
+
+ENTITY_LOOKUP_RE = re.compile(
+    r"^\s*(who|what|where)\s+(is|are|was|were)\s+([a-zA-Z0-9_' -]{2,80})\??\s*$",
+    re.IGNORECASE,
+)
+
 
 def _clean(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "").strip().lower())
@@ -56,6 +75,14 @@ def _clean(value: str) -> str:
 def _basename(path: str) -> str:
     clean_path = (path or "").replace("\\", "/")
     return PurePosixPath(clean_path).name.lower()
+
+
+def _stem_filename(path: str) -> str:
+    base = _basename(path)
+    for ext in DOC_EXTENSIONS.union(CODE_EXTENSIONS):
+        if base.endswith(ext):
+            return base[: -len(ext)]
+    return base
 
 
 def _tokens(value: str) -> set[str]:
@@ -127,6 +154,122 @@ def _looks_like_document_query(question: str) -> bool:
     return _has_any_phrase(q, DOCUMENT_HINTS)
 
 
+def _looks_like_short_entity_lookup(question: str) -> bool:
+    q = _clean(question)
+    if not ENTITY_LOOKUP_RE.match(q):
+        return False
+
+    technical_markers = (
+        "docker",
+        "kubernetes",
+        "terraform",
+        "aws",
+        "azure",
+        "gcp",
+        "python",
+        "fastapi",
+        "qdrant",
+        "ollama",
+        "prometheus",
+        "grafana",
+        "github",
+        "gitlab",
+        "pipeline",
+        "workflow",
+        "repo",
+        "code",
+        "function",
+        "class",
+        "module",
+    )
+
+    return not any(marker in q for marker in technical_markers)
+
+
+def _is_document_like_source(source: dict[str, Any]) -> bool:
+    file_type = str(source.get("file_type") or "").lower()
+    source_type = str(source.get("source_type") or "").lower()
+    source_path = str(source.get("source_path") or "")
+    base = _basename(source_path)
+
+    if file_type in DOC_EXTENSIONS:
+        return True
+
+    if source_type == "upload" and not any(base.endswith(ext) for ext in CODE_EXTENSIONS):
+        return True
+
+    return False
+
+
+def _uploaded_document_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    docs: list[dict[str, Any]] = []
+
+    for item in sources:
+        source_type = str(item.get("source_type") or "").lower()
+        if source_type != "upload":
+            continue
+
+        if not _is_document_like_source(item):
+            continue
+
+        docs.append(item)
+
+    return docs
+
+
+def _match_source_mentioned_in_question(
+    sources: list[dict[str, Any]],
+    question: str,
+) -> dict[str, Any] | None:
+    """
+    Resolve explicit source references like:
+    - in 01-small-novel.md, who is Mira?
+    - from small novel, who is Mira?
+    - in Yoga-Aphorisms-of-Patanjali.pdf, what is samadhi?
+    """
+    q = _clean(question)
+    q_tokens = _tokens(q)
+
+    best: tuple[int, dict[str, Any]] | None = None
+
+    for item in sources:
+        source_path = str(item.get("source_path") or "")
+        base = _basename(source_path)
+        stem = _stem_filename(source_path)
+        base_tokens = _tokens(base)
+        stem_tokens = _tokens(stem)
+
+        score = 0
+
+        if base and base in q:
+            score += 20
+
+        if stem and stem in q:
+            score += 15
+
+        overlap = q_tokens.intersection(base_tokens.union(stem_tokens))
+        score += min(len(overlap), 8)
+
+        # Boost meaningful filename token matches like "novel", "patanjali", "yoga".
+        meaningful_overlap = {
+            token
+            for token in overlap
+            if token not in {"pdf", "docx", "txt", "md", "rst", "the", "and", "file", "document"}
+        }
+        score += len(meaningful_overlap) * 2
+
+        if score <= 0:
+            continue
+
+        if best is None or score > best[0]:
+            best = (score, item)
+
+    if best and best[0] >= 4:
+        return best[1]
+
+    return None
+
+
 def _score_source_for_question(source: dict[str, Any], question: str) -> int:
     q = _clean(question)
     q_tokens = _tokens(q)
@@ -139,15 +282,12 @@ def _score_source_for_question(source: dict[str, Any], question: str) -> int:
 
     score = 0
 
-    # Prefer uploaded files for vague "this profile/document" questions.
     if source_type == "upload":
         score += 2
 
-    # Prefer document-like file types.
     if file_type in DOC_EXTENSIONS:
         score += 2
 
-    # Prefer CV/resume/profile filenames for profile queries.
     if _looks_like_profile_query(q):
         if file_type in PROFILE_EXTENSIONS:
             score += 3
@@ -166,12 +306,10 @@ def _score_source_for_question(source: dict[str, Any], question: str) -> int:
         if "dev" in q and "dev" in base:
             score += 2
 
-    # Token overlap with filename/path.
     overlap = q_tokens.intersection(base_tokens)
     score += min(len(overlap), 6)
 
-    # Penalise code files for profile/document questions.
-    if file_type in {".py", ".js", ".ts", ".tsx", ".jsx", ".tf", ".sh", ".sql"}:
+    if file_type in CODE_EXTENSIONS:
         score -= 3
 
     return score
@@ -184,13 +322,15 @@ def resolve_source_for_question(
     file_type: str | None = None,
 ) -> dict[str, Any]:
     """
-    Resolve vague source references without hardcoding document content.
+    Resolve vague source references safely.
 
     Priority:
     1. If UI already provided source_id, keep it.
-    2. If question says CV/resume/profile, prefer latest matching uploaded CV/profile source.
-    3. If question says this document/file/source, prefer latest uploaded document-like source.
-    4. Otherwise do not force a source.
+    2. If question explicitly mentions a filename/source name, use that source.
+    3. If question says CV/resume/profile, prefer matching uploaded CV/profile source.
+    4. If question says this document/file/source, use the latest uploaded document.
+    5. If there is exactly one uploaded document and the question is a short entity lookup, use it.
+    6. If there are multiple uploaded documents and the question is ambiguous, do not force a source.
     """
     cleaned = _clean(question)
 
@@ -199,16 +339,6 @@ def resolve_source_for_question(
             "source_id": source_id,
             "mode": "selected_source",
             "reason": "Source was explicitly selected by the UI/request.",
-            "score": None,
-        }
-
-    should_resolve = _looks_like_profile_query(cleaned) or _looks_like_document_query(cleaned)
-
-    if not should_resolve:
-        return {
-            "source_id": None,
-            "mode": "all_sources",
-            "reason": "Question does not contain a source-specific profile/document hint.",
             "score": None,
         }
 
@@ -229,6 +359,58 @@ def resolve_source_for_question(
             "score": None,
         }
 
+    explicit_source = _match_source_mentioned_in_question(sources, cleaned)
+    if explicit_source:
+        return {
+            "source_id": explicit_source.get("source_id"),
+            "source_path": explicit_source.get("source_path"),
+            "source_type": explicit_source.get("source_type"),
+            "file_type": explicit_source.get("file_type"),
+            "mode": "explicit_source_mention",
+            "reason": "Question mentioned a filename/source name, so retrieval was scoped to that source.",
+            "score": 20,
+        }
+
+    uploaded_docs = _uploaded_document_sources(sources)
+
+    # "this document" should mean the latest uploaded document.
+    if _looks_like_document_query(cleaned):
+        if uploaded_docs:
+            latest_doc = uploaded_docs[0]
+            return {
+                "source_id": latest_doc.get("source_id"),
+                "source_path": latest_doc.get("source_path"),
+                "source_type": latest_doc.get("source_type"),
+                "file_type": latest_doc.get("file_type"),
+                "mode": "latest_uploaded_document_reference",
+                "reason": "Question referred to this/the uploaded document, so retrieval used the latest uploaded document.",
+                "score": 10,
+            }
+
+    # Safe shortcut only when there is one uploaded document.
+    # Do NOT blindly select the latest upload when many documents exist.
+    if _looks_like_short_entity_lookup(cleaned) and len(uploaded_docs) == 1:
+        only_doc = uploaded_docs[0]
+        return {
+            "source_id": only_doc.get("source_id"),
+            "source_path": only_doc.get("source_path"),
+            "source_type": only_doc.get("source_type"),
+            "file_type": only_doc.get("file_type"),
+            "mode": "single_uploaded_document_entity_lookup",
+            "reason": "Short entity lookup was scoped to the only active uploaded document.",
+            "score": 10,
+        }
+
+    should_resolve = _looks_like_profile_query(cleaned)
+
+    if not should_resolve:
+        return {
+            "source_id": None,
+            "mode": "all_sources",
+            "reason": "Question is ambiguous across multiple sources; no source was forced.",
+            "score": None,
+        }
+
     scored = []
     for item in sources:
         score = _score_source_for_question(item, cleaned)
@@ -244,8 +426,6 @@ def resolve_source_for_question(
 
     best_score, best = scored[0]
 
-    # Conservative threshold:
-    # Avoid forcing source if signal is weak.
     if best_score < 4:
         return {
             "source_id": None,

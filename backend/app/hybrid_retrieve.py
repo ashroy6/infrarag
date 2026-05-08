@@ -25,22 +25,42 @@ MAX_KEYWORD_SCAN_SOURCES = int(os.getenv("MAX_KEYWORD_SCAN_SOURCES", "80"))
 MAX_KEYWORD_SCAN_CHUNKS_PER_SOURCE = int(os.getenv("MAX_KEYWORD_SCAN_CHUNKS_PER_SOURCE", "3000"))
 EXACT_PHRASE_SCAN_LIMIT_PER_SOURCE = int(os.getenv("EXACT_PHRASE_SCAN_LIMIT_PER_SOURCE", "5000"))
 
+ENTITY_SCAN_LIMIT_PER_SOURCE = int(os.getenv("ENTITY_SCAN_LIMIT_PER_SOURCE", "2500"))
+ENTITY_MAX_SCAN_SOURCES = int(os.getenv("ENTITY_MAX_SCAN_SOURCES", "80"))
+
+ENTITY_IDENTITY_PATTERNS = (
+    r"\b{entity}\s+is\s+(?:a|an|the)?\b",
+    r"\b{entity}\s+was\s+(?:a|an|the)?\b",
+    r"\b{entity}\s*,\s+(?:a|an|the)\b",
+    r"\b{entity}\s*[-—]\s*(?:a|an|the)?\b",
+    r"\bcalled\s+{entity}\b",
+    r"\bnamed\s+{entity}\b",
+    r"\bknown\s+as\s+{entity}\b",
+    r"\b{entity}'s\s+(?:role|job|identity|purpose|mission|background)\b",
+)
+
+ENTITY_NOISE_PATTERNS = (
+    r"\bcreated\s+by\s+{entity}\b",
+    r"\bopened\s+by\s+{entity}\b",
+    r"\bassigned\s+to\s+{entity}\b",
+    r"\breviewed\s+by\s+{entity}\b",
+    r"\bcommented\s+by\s+{entity}\b",
+    r"\bauthor(?:ed)?\s+by\s+{entity}\b",
+    r"\bcommitted\s+by\s+{entity}\b",
+    r"\bemail\s+from\s+{entity}\b",
+    r"\bfrom\s+{entity}\b",
+    r"\bissue\s+creator\b",
+    r"\bgithub\s+issue\b",
+    r"\bpull\s+request\b",
+    r"\bcommit\b",
+)
+
 
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
-
 def exact_phrase_in_text(text: str, phrase: str) -> bool:
-    """
-    Word-boundary exact phrase check.
-
-    Matches:
-      "In the beginning"
-
-    Rejects:
-      "in the beginnings"
-    """
     clean_phrase = re.sub(r"\s+", " ", str(phrase or "").strip())
     if not clean_phrase:
         return False
@@ -48,7 +68,6 @@ def exact_phrase_in_text(text: str, phrase: str) -> bool:
     words = clean_phrase.split(" ")
     pattern = r"(?<![A-Za-z0-9_])" + r"\s+".join(re.escape(word) for word in words) + r"(?![A-Za-z0-9_])"
     return re.search(pattern, str(text or ""), flags=re.IGNORECASE) is not None
-
 
 
 def tokenize(text: str) -> list[str]:
@@ -110,6 +129,135 @@ def keyword_score(query: str, text: str, source: str = "", exact_phrases: list[s
     return round(min(1.0, (0.70 * overlap) + (0.30 * exact_bonus)), 6)
 
 
+def _safe_entity_regex(entity: str) -> str:
+    return re.escape(str(entity or "").strip())
+
+
+def _entity_word_match(text: str, entity: str) -> bool:
+    clean_entity = str(entity or "").strip()
+    if not clean_entity:
+        return False
+
+    pattern = r"(?<![A-Za-z0-9_])" + re.escape(clean_entity) + r"(?![A-Za-z0-9_])"
+    return re.search(pattern, str(text or ""), flags=re.IGNORECASE) is not None
+
+
+def _source_kind_hint(hit: dict[str, Any]) -> str:
+    source = str(hit.get("source") or "").lower()
+    source_type = str(hit.get("source_type") or "").lower()
+    file_type = str(hit.get("file_type") or "").lower()
+
+    combined = f"{source} {source_type} {file_type}"
+
+    if any(marker in combined for marker in ("github", ".git", "issue", "pull_request", "pull-request", "commit")):
+        return "github"
+    if any(marker in combined for marker in ("ticket", "support", "helpdesk", "incident")):
+        return "ticket"
+    if any(marker in combined for marker in ("email", "gmail", "mail")):
+        return "email"
+    if any(marker in combined for marker in ("invoice", "finance")):
+        return "finance"
+    if file_type in {".md", ".txt", ".pdf", ".docx"}:
+        return "document"
+    return "unknown"
+
+
+def _entity_identity_score(text: str, entity: str) -> tuple[float, list[str]]:
+    raw = str(text or "")
+    if not raw or not entity:
+        return 0.0, []
+
+    safe_entity = _safe_entity_regex(entity)
+    score = 0.0
+    reasons: list[str] = []
+
+    if _entity_word_match(raw, entity):
+        score += 0.30
+        reasons.append("exact_entity_match")
+
+    entity_count = len(
+        re.findall(
+            r"(?<![A-Za-z0-9_])" + safe_entity + r"(?![A-Za-z0-9_])",
+            raw,
+            flags=re.IGNORECASE,
+        )
+    )
+    if entity_count >= 2:
+        score += min(0.15, entity_count * 0.03)
+        reasons.append("repeated_entity_mentions")
+
+    for pattern_template in ENTITY_IDENTITY_PATTERNS:
+        pattern = pattern_template.format(entity=safe_entity)
+        if re.search(pattern, raw, flags=re.IGNORECASE):
+            score += 0.35
+            reasons.append("identity_pattern")
+            break
+
+    first_500 = raw[:500]
+    if _entity_word_match(first_500, entity):
+        score += 0.10
+        reasons.append("entity_near_chunk_start")
+
+    for pattern_template in ENTITY_NOISE_PATTERNS:
+        pattern = pattern_template.format(entity=safe_entity)
+        if re.search(pattern, raw, flags=re.IGNORECASE):
+            score -= 0.25
+            reasons.append("operational_noise_penalty")
+            break
+
+    return round(max(0.0, min(score, 1.0)), 6), reasons
+
+
+def _entity_source_prior(hit: dict[str, Any]) -> float:
+    kind = _source_kind_hint(hit)
+
+    if kind == "document":
+        return 0.10
+    if kind in {"github", "ticket", "email"}:
+        return -0.08
+    if kind == "finance":
+        return -0.04
+    return 0.0
+
+
+def _score_entity_hit(hit: dict[str, Any], entity: str) -> dict[str, Any] | None:
+    text = str(hit.get("text") or "")
+    source = str(hit.get("source") or "")
+
+    if not _entity_word_match(f"{source}\n{text}", entity):
+        return None
+
+    item = dict(hit)
+
+    lexical = max(
+        keyword_score(entity, text, source),
+        normalize_score(item.get("keyword_score", 0.0)),
+        normalize_score(item.get("lexical_score", 0.0)),
+    )
+    vector = normalize_score(item.get("vector_score", item.get("score", 0.0)))
+    identity, reasons = _entity_identity_score(text, entity)
+    source_prior = _entity_source_prior(item)
+
+    final = (0.50 * lexical) + (0.30 * identity) + (0.12 * vector) + source_prior
+
+    if identity >= 0.55:
+        final += 0.08
+
+    item["primary_entity"] = entity
+    item["entity_identity_score"] = identity
+    item["entity_score_reasons"] = reasons
+    item["entity_source_kind"] = _source_kind_hint(item)
+    item["entity_source_prior"] = source_prior
+    item["keyword_score"] = lexical
+    item["lexical_score"] = lexical
+    item["vector_score"] = vector
+    item["pre_cluster_score"] = round(max(0.0, min(final, 1.0)), 6)
+    item["score"] = item["pre_cluster_score"]
+    item["retrieval_channel"] = item.get("retrieval_channel") or "entity_lookup"
+
+    return item
+
+
 def _extract_matching_snippet(text: str, phrase: str, radius: int = 260) -> str:
     raw = str(text or "")
     clean_raw = re.sub(r"\s+", " ", raw)
@@ -125,7 +273,6 @@ def _extract_matching_snippet(text: str, phrase: str, radius: int = 260) -> str:
     start = max(0, idx - radius)
     end = min(len(clean_raw), idx + len(clean_phrase) + radius)
 
-    # Prefer sentence-ish boundary where possible.
     left = clean_raw.rfind(". ", 0, idx)
     if left >= 0 and idx - left < radius:
         start = left + 2
@@ -238,6 +385,46 @@ def _scan_sources_for_exact_phrase(
     return verified
 
 
+def _scan_sources_for_entity(
+    *,
+    entity: str,
+    source_id: str | None,
+    source_type: str | None,
+    file_type: str | None,
+    allowed_source_ids: list[str] | None,
+) -> list[dict[str, Any]]:
+    if not entity:
+        return []
+
+    source_ids = _candidate_source_ids(
+        source_id=source_id,
+        source_type=source_type,
+        file_type=file_type,
+        allowed_source_ids=allowed_source_ids,
+    )[:ENTITY_MAX_SCAN_SOURCES]
+
+    hits: list[dict[str, Any]] = []
+
+    for sid in source_ids:
+        chunks = get_chunks_by_source_id(sid)
+        for chunk in chunks[:ENTITY_SCAN_LIMIT_PER_SOURCE]:
+            scored = _score_entity_hit(chunk, entity)
+            if not scored:
+                continue
+            scored["retrieval_channel"] = "entity_exact_scan"
+            hits.append(scored)
+
+    hits = dedupe_hits(hits)
+    hits.sort(
+        key=lambda item: (
+            normalize_score(item.get("score", 0.0)),
+            normalize_score(item.get("entity_identity_score", 0.0)),
+            normalize_score(item.get("keyword_score", 0.0)),
+        ),
+        reverse=True,
+    )
+    return hits
+
 
 SECTION_REF_RE = re.compile(
     r"\b(?P<name>[A-Z][A-Za-z0-9_-]{2,50}|chapter|section|part|book|clause|article)\s+(?P<number>\d{1,4})\b",
@@ -287,8 +474,6 @@ def _section_ref_in_text(text: str, ref: dict[str, str]) -> bool:
         rf"(?<![A-Za-z0-9_]){number}\s*:\s*1\b",
     ]
 
-    # The last pattern alone is too broad. Only allow it if the named section
-    # appears near the same chunk. This helps book/chapter texts like Genesis 1:1.
     name_present = re.search(rf"(?<![A-Za-z0-9_]){name}(?![A-Za-z0-9_])", raw, flags=re.IGNORECASE) is not None
 
     for idx, pattern in enumerate(patterns):
@@ -366,7 +551,6 @@ def _scan_sources_for_section_reference(
                 item["matching_snippet"] = _section_matching_snippet(item.get("text", ""), ref)
                 item["score"] = max(normalize_score(item.get("score", 0.0)), 0.96)
 
-                # Prefer exact named section references over generic chapter number matches.
                 text_lower = str(item.get("text", "")).lower()
                 label_lower = ref["label"].lower()
                 if label_lower in text_lower or f"{label_lower}:" in text_lower:
@@ -384,7 +568,6 @@ def _scan_sources_for_section_reference(
         )
     )
     return hits[:limit]
-
 
 
 def multi_query_vector_search(
@@ -527,6 +710,8 @@ def cluster_sources(hits: list[dict[str, Any]], strategy: str) -> list[dict[str,
 
     if strategy == "allow_multiple_sources":
         selected_sources = {sid for sid, _ in ranked[:5]}
+    elif strategy == "entity_disambiguation":
+        selected_sources = {sid for sid, _ in ranked[:4]}
     else:
         selected_sources = {ranked[0][0]}
 
@@ -546,6 +731,7 @@ def cluster_sources(hits: list[dict[str, Any]], strategy: str) -> list[dict[str,
     clustered.sort(
         key=lambda item: (
             normalize_score(item.get("score", 0.0)),
+            normalize_score(item.get("entity_identity_score", 0.0)),
             normalize_score(item.get("source_cluster_score", 0.0)),
             normalize_score(item.get("keyword_score", 0.0)),
             normalize_score(item.get("vector_score", 0.0)),
@@ -557,7 +743,7 @@ def cluster_sources(hits: list[dict[str, Any]], strategy: str) -> list[dict[str,
 
 
 def diversify_final_hits(hits: list[dict[str, Any]], top_n: int, strategy: str) -> list[dict[str, Any]]:
-    if strategy != "allow_multiple_sources" or not hits:
+    if strategy not in {"allow_multiple_sources", "entity_disambiguation"} or not hits:
         return hits[:top_n]
 
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -566,25 +752,42 @@ def diversify_final_hits(hits: list[dict[str, Any]], top_n: int, strategy: str) 
         grouped[source_key(hit)].append(hit)
 
     for source_hits in grouped.values():
-        source_hits.sort(key=lambda item: normalize_score(item.get("score", 0.0)), reverse=True)
+        source_hits.sort(
+            key=lambda item: (
+                normalize_score(item.get("score", 0.0)),
+                normalize_score(item.get("entity_identity_score", 0.0)),
+            ),
+            reverse=True,
+        )
 
     ranked_sources = sorted(
         grouped.keys(),
-        key=lambda sid: normalize_score(grouped[sid][0].get("score", 0.0)),
+        key=lambda sid: (
+            normalize_score(grouped[sid][0].get("score", 0.0)),
+            normalize_score(grouped[sid][0].get("entity_identity_score", 0.0)),
+        ),
         reverse=True,
     )
 
     selected: list[dict[str, Any]] = []
     seen: set[tuple[str, int]] = set()
 
-    for sid in ranked_sources[: min(4, top_n)]:
+    max_seed_sources = min(4, top_n)
+    for sid in ranked_sources[:max_seed_sources]:
         hit = grouped[sid][0]
         key = hit_key(hit)
         if key not in seen:
             seen.add(key)
             selected.append(hit)
 
-    for hit in sorted(hits, key=lambda item: normalize_score(item.get("score", 0.0)), reverse=True):
+    for hit in sorted(
+        hits,
+        key=lambda item: (
+            normalize_score(item.get("score", 0.0)),
+            normalize_score(item.get("entity_identity_score", 0.0)),
+        ),
+        reverse=True,
+    ):
         if len(selected) >= top_n:
             break
         key = hit_key(hit)
@@ -593,7 +796,13 @@ def diversify_final_hits(hits: list[dict[str, Any]], top_n: int, strategy: str) 
         seen.add(key)
         selected.append(hit)
 
-    selected.sort(key=lambda item: normalize_score(item.get("score", 0.0)), reverse=True)
+    selected.sort(
+        key=lambda item: (
+            normalize_score(item.get("score", 0.0)),
+            normalize_score(item.get("entity_identity_score", 0.0)),
+        ),
+        reverse=True,
+    )
     return selected[:top_n]
 
 
@@ -676,8 +885,6 @@ def _exact_phrase_retrieve(
         if item:
             verified.append(item)
 
-    # FTS can miss good matches when chunks are large or tokenisation is noisy.
-    # For exact phrase mode, correctness beats clever ranking.
     scanned = _scan_sources_for_exact_phrase(
         exact_phrases=exact_phrases,
         source_id=source_id,
@@ -689,7 +896,6 @@ def _exact_phrase_retrieve(
 
     verified = dedupe_hits(verified)
 
-    # For exact phrase lookup, source order + chunk order is usually more useful than BM25 noise.
     verified.sort(
         key=lambda item: (
             str(item.get("source") or ""),
@@ -708,6 +914,169 @@ def _exact_phrase_retrieve(
         hit["reranker_used"] = False
         hit["neighbour_window"] = 0
         hit["retrieval_planner_reason"] = "Exact phrase retrieval verified the phrase exists in each returned chunk."
+
+    return final_hits
+
+
+def _entity_lookup_retrieve(
+    *,
+    query: str,
+    retrieval_plan: dict[str, Any],
+    limit: int,
+    source_id: str | None,
+    source: str | None,
+    source_type: str | None,
+    file_type: str | None,
+    page_start: int | None,
+    page_end: int | None,
+    allowed_source_ids: list[str] | None,
+) -> list[dict[str, Any]]:
+    entity = str(retrieval_plan.get("primary_entity") or "").strip()
+    if not entity:
+        return []
+
+    safe_limit = max(1, min(int(limit), 50))
+
+    queries = retrieval_plan.get("rewritten_queries") or [entity]
+    queries = [
+        re.sub(r"\s+", " ", str(item or "").strip())
+        for item in queries
+        if str(item or "").strip()
+    ]
+
+    # For entity lookup, exact/keyword evidence must dominate.
+    keyword_hits = keyword_search(
+        query=entity,
+        queries=queries[:5],
+        keyword_top_k=max(40, int(retrieval_plan.get("keyword_top_k", 60) or 60)),
+        source_id=source_id,
+        source_type=source_type,
+        file_type=file_type,
+        page_start=page_start,
+        page_end=page_end,
+        allowed_source_ids=allowed_source_ids,
+        exact_phrases=[entity],
+    )
+
+    scored_hits: list[dict[str, Any]] = []
+    for hit in keyword_hits:
+        scored = _score_entity_hit(hit, entity)
+        if scored:
+            scored["retrieval_channel"] = hit.get("retrieval_channel") or "entity_fts"
+            scored_hits.append(scored)
+
+    # Exact scan catches chunks FTS may miss due to tokenisation or chunk shape.
+    scanned_hits = _scan_sources_for_entity(
+        entity=entity,
+        source_id=source_id,
+        source_type=source_type,
+        file_type=file_type,
+        allowed_source_ids=allowed_source_ids,
+    )
+    scored_hits.extend(scanned_hits)
+
+    use_vector = bool(retrieval_plan.get("use_vector_search", True))
+    entity_is_short_name = len(tokenize(entity)) <= 1 and len(entity) <= 40
+
+    # Vector is useful as fallback, but dangerous for short names. Keep it small.
+    if use_vector:
+        vector_limit = 20 if entity_is_short_name else 40
+        vector_hits = multi_query_vector_search(
+            queries=[entity],
+            candidate_top_k=vector_limit,
+            source_id=source_id,
+            source=source,
+            source_type=source_type,
+            file_type=file_type,
+            page_start=page_start,
+            page_end=page_end,
+            allowed_source_ids=allowed_source_ids,
+        )
+        for hit in vector_hits:
+            scored = _score_entity_hit(hit, entity)
+            if scored:
+                scored["retrieval_channel"] = "entity_vector"
+                # Demote vector-only short-name matches unless they have identity evidence.
+                if entity_is_short_name and normalize_score(scored.get("entity_identity_score", 0.0)) < 0.45:
+                    scored["score"] = round(normalize_score(scored.get("score", 0.0)) * 0.72, 6)
+                    scored["pre_cluster_score"] = scored["score"]
+                    scored.setdefault("entity_score_reasons", []).append("short_name_vector_demotion")
+                scored_hits.append(scored)
+
+    scored_hits = dedupe_hits(scored_hits)
+    if not scored_hits:
+        return []
+
+    # Entity lookup must not select one source too early.
+    clustered = cluster_sources(scored_hits, "entity_disambiguation")
+
+    # Keep a balanced set before rerank: top identity chunks from several sources.
+    pre_rerank = diversify_final_hits(
+        clustered,
+        top_n=max(int(retrieval_plan.get("final_top_k", safe_limit) or safe_limit) * 2, safe_limit),
+        strategy="entity_disambiguation",
+    )
+
+    neighbour_window = int(retrieval_plan.get("neighbour_window", 0) or 0)
+    if neighbour_window > 0:
+        pre_rerank = expand_neighbour_chunks(pre_rerank, neighbour_window=neighbour_window)
+
+        rescored: list[dict[str, Any]] = []
+        for hit in pre_rerank:
+            scored = _score_entity_hit(hit, entity)
+            if scored:
+                scored["retrieval_channel"] = hit.get("retrieval_channel") or "entity_neighbour"
+                rescored.append(scored)
+            elif hit.get("neighbour_added"):
+                item = dict(hit)
+                item["primary_entity"] = entity
+                item["entity_identity_score"] = 0.0
+                item["score"] = min(normalize_score(item.get("score", 0.0)), 0.25)
+                rescored.append(item)
+        pre_rerank = dedupe_hits(rescored)
+
+    use_reranker = bool(retrieval_plan.get("use_reranker", True))
+    final_top_k = max(safe_limit, int(retrieval_plan.get("final_top_k", safe_limit) or safe_limit))
+    final_top_k = max(1, min(final_top_k, 16))
+
+    if use_reranker:
+        reranked = rerank_hits(
+            question=query,
+            hits=pre_rerank,
+            top_n=max(final_top_k * 2, final_top_k),
+        )
+
+        # Blend reranker output with deterministic entity evidence.
+        for hit in reranked:
+            entity_score = normalize_score(hit.get("entity_identity_score", 0.0))
+            current_score = normalize_score(hit.get("score", 0.0))
+            hit["score"] = round((0.72 * current_score) + (0.28 * entity_score), 6)
+    else:
+        reranked = sorted(
+            pre_rerank,
+            key=lambda item: (
+                normalize_score(item.get("score", 0.0)),
+                normalize_score(item.get("entity_identity_score", 0.0)),
+            ),
+            reverse=True,
+        )
+
+    final_hits = diversify_final_hits(
+        reranked,
+        top_n=final_top_k,
+        strategy="entity_disambiguation",
+    )[:safe_limit]
+
+    for hit in final_hits:
+        hit["adaptive_retrieval"] = True
+        hit["retrieval_mode"] = "entity_lookup"
+        hit["retrieval_speed"] = retrieval_plan.get("retrieval_speed", "normal")
+        hit["retriever_used"] = "entity FTS/exact scan + guarded Qdrant"
+        hit["query_shape"] = retrieval_plan.get("query_shape", "entity_lookup")
+        hit["reranker_used"] = bool(use_reranker)
+        hit["neighbour_window"] = int(retrieval_plan.get("neighbour_window", 0) or 0)
+        hit["retrieval_planner_reason"] = retrieval_plan.get("planner_reason", "")
+        hit["primary_entity"] = entity
 
     return final_hits
 
@@ -743,7 +1112,9 @@ def adaptive_hybrid_retrieve(
         if str(item or "").strip()
     ]
 
-    if retrieval_plan.get("retrieval_mode") == "exact_phrase_search" and exact_phrases:
+    retrieval_mode = str(retrieval_plan.get("retrieval_mode") or "")
+
+    if retrieval_mode == "exact_phrase_search" and exact_phrases:
         return _exact_phrase_retrieve(
             query=query,
             exact_phrases=exact_phrases,
@@ -756,7 +1127,23 @@ def adaptive_hybrid_retrieve(
             allowed_source_ids=allowed_source_ids,
         )
 
-    if retrieval_plan.get("retrieval_mode") in {"section_retrieval", "section_topic_retrieval"}:
+    if retrieval_mode == "entity_lookup" or retrieval_plan.get("query_shape") in {"entity_lookup", "definition"}:
+        entity_hits = _entity_lookup_retrieve(
+            query=query,
+            retrieval_plan=retrieval_plan,
+            limit=safe_limit,
+            source_id=source_id,
+            source=source,
+            source_type=source_type,
+            file_type=file_type,
+            page_start=page_start,
+            page_end=page_end,
+            allowed_source_ids=allowed_source_ids,
+        )
+        if entity_hits:
+            return entity_hits
+
+    if retrieval_mode in {"section_retrieval", "section_topic_retrieval"}:
         section_hits = _scan_sources_for_section_reference(
             query=query,
             limit=max(safe_limit, int(retrieval_plan.get("final_top_k", safe_limit) or safe_limit)),

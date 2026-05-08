@@ -145,6 +145,28 @@ SOURCE_NAVIGATION_MARKERS = (
     "show where",
 )
 
+ENTITY_PREFIX_PATTERNS = (
+    r"^\s*who\s+is\s+(.+?)(?:\?|$)",
+    r"^\s*who\s+was\s+(.+?)(?:\?|$)",
+    r"^\s*what\s+is\s+(.+?)(?:\?|$)",
+    r"^\s*what\s+are\s+(.+?)(?:\?|$)",
+    r"^\s*where\s+is\s+(.+?)(?:\?|$)",
+    r"^\s*where\s+are\s+(.+?)(?:\?|$)",
+    r"^\s*tell\s+me\s+about\s+(.+?)(?:\?|$)",
+    r"^\s*define\s+(.+?)(?:\?|$)",
+    r"^\s*meaning\s+of\s+(.+?)(?:\?|$)",
+)
+
+ENTITY_TRAILING_NOISE_RE = re.compile(
+    r"\b(in|inside|from|within|for|of|on|at|file|document|source|page|chapter|section)\b.*$",
+    re.IGNORECASE,
+)
+
+ENTITY_LEADING_NOISE_RE = re.compile(
+    r"^\s*(the|a|an|this|that|these|those)\s+",
+    re.IGNORECASE,
+)
+
 
 def _clean_query(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "").strip())
@@ -208,6 +230,72 @@ def _looks_like_section_reference(q: str) -> bool:
 def _looks_like_entity_lookup(q: str) -> bool:
     clean = _lower(q)
     return any(re.search(pattern, clean) for pattern in ENTITY_LOOKUP_PATTERNS)
+
+
+def _extract_primary_entity(query: str) -> str:
+    """
+    Extract the entity from simple lookup questions.
+
+    Examples:
+      "who is mira" -> "mira"
+      "tell me about Terraform" -> "Terraform"
+      "what is RDS?" -> "RDS"
+
+    This deliberately avoids clever LLM rewriting.
+    """
+    clean = _clean_query(query)
+    if not clean:
+        return ""
+
+    for pattern in ENTITY_PREFIX_PATTERNS:
+        match = re.search(pattern, clean, flags=re.IGNORECASE)
+        if not match:
+            continue
+
+        entity = str(match.group(1) or "").strip(" ?.,:;\"'")
+        entity = ENTITY_TRAILING_NOISE_RE.sub("", entity).strip(" ?.,:;\"'")
+        entity = ENTITY_LEADING_NOISE_RE.sub("", entity).strip(" ?.,:;\"'")
+        entity = _clean_query(entity)
+
+        if entity and len(entity) <= 80:
+            return entity
+
+    return ""
+
+
+def _entity_rewritten_queries(entity: str, original_query: str) -> list[str]:
+    """
+    Entity lookup must search the entity, not only the full natural-language question.
+    Keep this small to avoid FTS noise.
+    """
+    clean_entity = _clean_query(entity)
+    clean_original = _clean_query(original_query)
+
+    queries: list[str] = []
+    if clean_entity:
+        queries.extend(
+            [
+                clean_entity,
+                f'"{clean_entity}"',
+                f"{clean_entity} is",
+                f"{clean_entity} was",
+                f"{clean_entity},",
+            ]
+        )
+
+    if clean_original and clean_original not in queries:
+        queries.append(clean_original)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in queries:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    return deduped[:5]
 
 
 def _looks_like_yes_no_relationship(q: str) -> bool:
@@ -303,11 +391,6 @@ def _extract_comparison_entities(query: str) -> list[str]:
 
 
 def _apply_fast_mode(plan: dict[str, Any]) -> dict[str, Any]:
-    """
-    Fast mode trades depth for speed.
-
-    It is intended for quick factual/entity/exact searches, not deep summaries.
-    """
     fast = dict(plan)
     fast["retrieval_speed"] = "fast"
 
@@ -331,14 +414,14 @@ def _apply_fast_mode(plan: dict[str, Any]) -> dict[str, Any]:
     if query_shape in {"entity_lookup", "definition", "yes_no_relationship", "source_navigation"}:
         fast.update(
             {
-                "candidate_top_k": 15,
-                "final_top_k": 3,
-                "keyword_top_k": 10,
+                "candidate_top_k": 25,
+                "final_top_k": 4,
+                "keyword_top_k": 20,
                 "neighbour_window": 0,
                 "use_keyword_search": True,
                 "use_vector_search": False,
                 "use_reranker": False,
-                "planner_reason": str(fast.get("planner_reason", "")) + " Fast mode: FTS5-first lookup, top 3 chunks, no reranker.",
+                "planner_reason": str(fast.get("planner_reason", "")) + " Fast mode: FTS5-first lookup, no vector noise.",
             }
         )
         return fast
@@ -387,13 +470,6 @@ def _apply_fast_mode(plan: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_direct_mode(plan: dict[str, Any]) -> dict[str, Any]:
-    """
-    Direct mode is fastest.
-
-    It retrieves only the strongest evidence and lets the backend return
-    a deterministic citation/snippet answer without calling Ollama for
-    simple lookup/search questions.
-    """
     direct = dict(plan)
     direct["retrieval_speed"] = "direct"
 
@@ -417,9 +493,9 @@ def _apply_direct_mode(plan: dict[str, Any]) -> dict[str, Any]:
     if query_shape in {"entity_lookup", "definition", "yes_no_relationship", "source_navigation"}:
         direct.update(
             {
-                "candidate_top_k": 8,
+                "candidate_top_k": 12,
                 "final_top_k": 3,
-                "keyword_top_k": 6,
+                "keyword_top_k": 10,
                 "neighbour_window": 0,
                 "use_keyword_search": True,
                 "use_vector_search": False,
@@ -444,18 +520,19 @@ def _apply_direct_mode(plan: dict[str, Any]) -> dict[str, Any]:
     return direct
 
 
+def _finish_speed(plan: dict[str, Any], retrieval_speed: str) -> dict[str, Any]:
+    if retrieval_speed == "direct":
+        return _apply_direct_mode(plan)
+    if retrieval_speed == "fast":
+        return _apply_fast_mode(plan)
+    return plan
+
+
 def build_adaptive_retrieval_plan(
     query: str,
     base_plan: dict[str, Any] | None = None,
     retrieval_speed: str = "normal",
 ) -> dict[str, Any]:
-    """
-    Deterministic retrieval planner.
-
-    This does not decide the answer pipeline.
-    router.py still decides pipeline.
-    This only decides how retrieval should search.
-    """
     base = dict(base_plan or {})
     clean_query = _clean_query(query)
     quoted = _quoted_phrases(clean_query)
@@ -483,6 +560,7 @@ def build_adaptive_retrieval_plan(
         "use_vector_search": True,
         "use_reranker": True,
         "comparison_entities": [],
+        "primary_entity": "",
         "exact_phrases": quoted,
         "planner_reason": "Default vector + rerank retrieval.",
         "retrieval_speed": "normal",
@@ -504,7 +582,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Quoted phrase detected, so exact phrase retrieval uses FTS5 only and disables vector/reranker noise.",
             }
         )
-        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+        return _finish_speed(plan, retrieval_speed)
 
     if _looks_like_comparison(clean_query) or question_type == "comparison":
         entities = _extract_comparison_entities(clean_query)
@@ -524,7 +602,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Comparison query detected, so retrieval must preserve evidence from multiple entities/sources.",
             }
         )
-        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+        return _finish_speed(plan, retrieval_speed)
 
     if _looks_like_troubleshooting(clean_query) or pipeline == "incident_runbook":
         plan.update(
@@ -540,7 +618,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Troubleshooting query detected, so exact error terms and nearby chunks matter.",
             }
         )
-        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+        return _finish_speed(plan, retrieval_speed)
 
     if _looks_like_overview(clean_query) or pipeline == "document_summary":
         plan.update(
@@ -556,7 +634,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Overview query detected, so section-leading and neighbouring chunks are useful.",
             }
         )
-        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+        return _finish_speed(plan, retrieval_speed)
 
     if _looks_like_code(clean_query) or pipeline == "repo_explanation":
         plan.update(
@@ -572,7 +650,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Code/repo query detected, so filenames, symbols, and adjacent chunks matter.",
             }
         )
-        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+        return _finish_speed(plan, retrieval_speed)
 
     if _looks_like_how_to(clean_query) or question_type == "how_to_steps":
         plan.update(
@@ -590,7 +668,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "How-to query detected, so retrieval uses hybrid search plus nearby supporting chunks.",
             }
         )
-        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+        return _finish_speed(plan, retrieval_speed)
 
     if _looks_like_yes_no_relationship(clean_query) or question_type == "yes_no_relationship":
         plan.update(
@@ -608,7 +686,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Yes/no relationship query detected, so keyword-first hybrid retrieval is safer than planner-only routing.",
             }
         )
-        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+        return _finish_speed(plan, retrieval_speed)
 
     if _looks_like_source_navigation(clean_query) or question_type == "source_navigation":
         plan.update(
@@ -626,7 +704,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Source navigation query detected, so retrieval prioritizes exact source/citation matches.",
             }
         )
-        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+        return _finish_speed(plan, retrieval_speed)
 
     if _looks_like_list_or_examples(clean_query) or question_type == "list_or_examples":
         plan.update(
@@ -644,7 +722,7 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "List/examples query detected, so retrieval allows multiple sources and prioritizes matching terms.",
             }
         )
-        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+        return _finish_speed(plan, retrieval_speed)
 
     if _looks_like_section_reference(clean_query) or question_type in {"section_summary", "section_reference"}:
         plan.update(
@@ -662,24 +740,31 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Section/chapter reference detected, so retrieval uses section-aware hybrid search with nearby chunks.",
             }
         )
-        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+        return _finish_speed(plan, retrieval_speed)
 
     if _looks_like_entity_lookup(clean_query) or question_type in {"direct_factual", "definition", "entity_lookup"}:
         shape = "definition" if question_type == "definition" else "entity_lookup"
+        entity = _extract_primary_entity(clean_query)
+        rewritten_queries = _entity_rewritten_queries(entity, clean_query) if entity else [clean_query]
+
         plan.update(
             {
                 "query_shape": shape,
-                "retrieval_mode": "keyword_first_hybrid",
-                "candidate_top_k": max(plan["candidate_top_k"], 60),
+                "retrieval_mode": "entity_lookup",
+                "primary_entity": entity,
+                "rewritten_queries": rewritten_queries,
+                "candidate_top_k": max(plan["candidate_top_k"], 80),
                 "final_top_k": max(plan["final_top_k"], 8),
-                "keyword_top_k": 40,
+                "keyword_top_k": 60,
                 "neighbour_window": 1,
                 "use_keyword_search": True,
-                "source_strategy": "cluster_by_best_source",
-                "planner_reason": "Entity/definition lookup detected, so keyword-first hybrid retrieval is safer than vector-only retrieval.",
+                "use_vector_search": True,
+                "use_reranker": True,
+                "source_strategy": "entity_disambiguation",
+                "planner_reason": "Entity lookup detected, so retrieval extracts the entity, searches exact mentions first, scores identity evidence, and avoids early single-source clustering.",
             }
         )
-        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+        return _finish_speed(plan, retrieval_speed)
 
     if PAGE_RE.search(clean_query):
         plan.update(
@@ -694,6 +779,6 @@ def build_adaptive_retrieval_plan(
                 "planner_reason": "Page/section reference detected, so neighbouring chunks are useful.",
             }
         )
-        return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+        return _finish_speed(plan, retrieval_speed)
 
-    return _apply_direct_mode(plan) if retrieval_speed == "direct" else (_apply_fast_mode(plan) if retrieval_speed == "fast" else plan)
+    return _finish_speed(plan, retrieval_speed)
