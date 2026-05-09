@@ -1,13 +1,7 @@
 name: InfraRAG CI
 
 on:
-  push:
-    branches:
-      - main
-      - dev
-  pull_request:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   backend-checks:
