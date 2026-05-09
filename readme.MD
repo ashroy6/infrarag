@@ -115,16 +115,12 @@ The current architecture includes:
 
 ## Screenshots
 
-Add updated screenshots when available:
 
-```text
 ![InfraRAG Main UI](infrarag_ui_screenshot.png)
 ![InfraRAG Admin Panel](infrarag_admin_panel.png)
 ![InfraRAG Graph UI](infrarag_deatiled_ui.png)
 ![InfraRAG Agent Studio](infrarag_chunk_ui.png)
 ![InfraRAG Agent Studio](graph.png)
-
-```
 
 ---
 
