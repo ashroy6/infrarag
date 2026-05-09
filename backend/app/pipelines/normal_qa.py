@@ -28,16 +28,43 @@ def _chunk_meta(chunks: list[dict[str, Any]]) -> dict[str, Any]:
             "reranker_used": None,
             "retrieval_speed": None,
             "primary_entity": None,
+            "structured_reference": None,
+            "retrieval_trace": None,
+            "retrieval_health": "no_chunks",
         }
 
     first = chunks[0]
+
+    trace = first.get("retrieval_trace")
+    fallback_used = bool(first.get("structured_reference_fallback"))
+    structured_context_match = bool(first.get("structured_reference_context_match"))
+    retrieval_mode = first.get("retrieval_mode")
+    retriever_used = first.get("retriever_used")
+
+    if retrieval_mode == "structured_reference_retrieval" and fallback_used:
+        retrieval_health = "structured_reference_fallback"
+    elif retrieval_mode == "structured_reference_retrieval" and structured_context_match:
+        retrieval_health = "structured_reference_context_match"
+    elif retrieval_mode == "structured_reference_retrieval":
+        retrieval_health = "structured_reference_weak_context"
+    elif chunks:
+        retrieval_health = "ok"
+    else:
+        retrieval_health = "no_chunks"
+
     return {
-        "retriever_used": first.get("retriever_used"),
-        "retrieval_mode": first.get("retrieval_mode"),
+        "retriever_used": retriever_used,
+        "retrieval_mode": retrieval_mode,
         "query_shape": first.get("query_shape"),
         "reranker_used": first.get("reranker_used"),
         "retrieval_speed": first.get("retrieval_speed"),
         "primary_entity": first.get("primary_entity"),
+        "structured_reference": first.get("structured_reference"),
+        "structured_reference_context_match": first.get("structured_reference_context_match"),
+        "structured_reference_fallback": fallback_used,
+        "retrieval_trace": trace,
+        "retrieval_health": retrieval_health,
+        "retrieval_planner_reason": first.get("retrieval_planner_reason"),
     }
 
 

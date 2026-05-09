@@ -155,6 +155,21 @@ def _payload_to_hit(item: Any) -> dict[str, Any]:
         "tags": payload.get("tags", []),
         "agent_access_enabled": payload.get("agent_access_enabled"),
         "knowledge_source_id": payload.get("knowledge_source_id"),
+        "chunk_strategy": payload.get("chunk_strategy"),
+        "reference_labels": payload.get("reference_labels", []),
+        "references": payload.get("references", []),
+        "section_number": payload.get("section_number", ""),
+        "section_start": payload.get("section_start", ""),
+        "section_end": payload.get("section_end", ""),
+        "subsection_start": payload.get("subsection_start", ""),
+        "subsection_end": payload.get("subsection_end", ""),
+        "reference_type": payload.get("reference_type", ""),
+        "heading": payload.get("heading", ""),
+        "parent_title": payload.get("parent_title", ""),
+        "parent_id": payload.get("parent_id", ""),
+        "heading_path": payload.get("heading_path", ""),
+        "prev_chunk_index": payload.get("prev_chunk_index"),
+        "next_chunk_index": payload.get("next_chunk_index"),
     }
 
 

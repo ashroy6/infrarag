@@ -9,6 +9,7 @@ from app.embedding_service import get_embedding
 from app.keyword_index import search_keyword_index
 from app.metadata_db import MetadataDB
 from app.qdrant_client import get_chunks_by_refs, get_chunks_by_source_id, search
+from app.reference_extractor import extract_query_references, context_matches
 from app.reranker import rerank_hits
 
 STOP_WORDS = {
@@ -1560,6 +1561,236 @@ def _comparison_retrieve(
     return final_hits
 
 
+
+def _structured_reference_retrieve(
+    *,
+    query: str,
+    retrieval_plan: dict[str, Any],
+    limit: int,
+    source_id: str | None,
+    source_type: str | None,
+    file_type: str | None,
+    allowed_source_ids: list[str] | None,
+) -> list[dict[str, Any]]:
+    refs = extract_query_references(query)
+    if not refs:
+        return []
+
+    safe_limit = max(1, min(int(limit or 6), 20))
+    db = MetadataDB()
+
+    source_ids = _candidate_source_ids(
+        source_id=source_id,
+        source_type=source_type,
+        file_type=file_type,
+        allowed_source_ids=allowed_source_ids,
+    )
+
+    all_rows: list[dict[str, Any]] = []
+
+    for sid in source_ids:
+        for ref in refs:
+            named_context = str(ref.get("named_context") or "").strip()
+            matching_parent_regions: list[dict[str, Any]] = []
+
+            if named_context:
+                matching_parent_regions = db.search_parent_regions(
+                    source_id=sid,
+                    named_context=named_context,
+                    limit=20,
+                )
+
+            # Strong path: named reference + matching parent region.
+            if matching_parent_regions:
+                parent_ids = [
+                    str(region.get("parent_id") or "")
+                    for region in matching_parent_regions
+                    if str(region.get("parent_id") or "")
+                ]
+
+                rows = db.search_chunk_references(
+                    source_id=sid,
+                    section_number=str(ref.get("section_number") or ""),
+                    subsection_number=str(ref.get("subsection_number") or "") or None,
+                    reference_label=str(ref.get("reference_label") or "") if ref.get("reference_type") != "named_reference" else None,
+                    named_context=named_context,
+                    parent_ids=parent_ids,
+                    limit=max(40, safe_limit * 8),
+                )
+
+                region_by_id = {
+                    str(region.get("parent_id") or ""): region
+                    for region in matching_parent_regions
+                }
+
+                for row in rows:
+                    item = dict(row)
+                    region = region_by_id.get(str(item.get("parent_id") or ""), {})
+                    item["query_reference"] = ref
+                    item["parent_region_match"] = True
+                    item["context_score"] = max(
+                        float(item.get("context_score") or 0.0),
+                        float(region.get("context_score") or 0.0),
+                    )
+                    item["parent_region_title"] = region.get("parent_title")
+                    item["parent_region_key"] = region.get("parent_key")
+                    all_rows.append(item)
+
+            # Normal/fallback path.
+            rows = db.search_chunk_references(
+                source_id=sid,
+                section_number=str(ref.get("section_number") or ""),
+                subsection_number=str(ref.get("subsection_number") or "") or None,
+                reference_label=str(ref.get("reference_label") or "") if ref.get("reference_type") != "named_reference" else None,
+                named_context=named_context,
+                limit=max(20, safe_limit * 4),
+            )
+
+            for row in rows:
+                item = dict(row)
+                item["query_reference"] = ref
+                item["parent_region_candidates"] = [
+                    {
+                        "parent_id": r.get("parent_id"),
+                        "parent_title": r.get("parent_title"),
+                        "context_score": r.get("context_score"),
+                    }
+                    for r in matching_parent_regions[:5]
+                ]
+                all_rows.append(item)
+
+            if named_context and not ref.get("subsection_number"):
+                rows = db.search_chunk_references(
+                    source_id=sid,
+                    section_number=str(ref.get("section_number") or ""),
+                    named_context=named_context,
+                    limit=max(40, safe_limit * 6),
+                )
+                for row in rows:
+                    item = dict(row)
+                    item["query_reference"] = ref
+                    item["parent_region_candidates"] = [
+                        {
+                            "parent_id": r.get("parent_id"),
+                            "parent_title": r.get("parent_title"),
+                            "context_score": r.get("context_score"),
+                        }
+                        for r in matching_parent_regions[:5]
+                    ]
+                    all_rows.append(item)
+
+    best_rows: dict[tuple[str, int], dict[str, Any]] = {}
+
+    for row in all_rows:
+        try:
+            idx = int(row.get("chunk_index"))
+        except (TypeError, ValueError):
+            continue
+
+        sid = str(row.get("source_id") or "")
+        if not sid:
+            continue
+
+        key = (sid, idx)
+        existing = best_rows.get(key)
+
+        row_score = (
+            float(row.get("score") or 0.0)
+            + float(row.get("context_score") or 0.0)
+            + (2.0 if row.get("parent_region_match") else 0.0)
+        )
+        existing_score = (
+            float(existing.get("score") or 0.0)
+            + float(existing.get("context_score") or 0.0)
+            + (2.0 if existing.get("parent_region_match") else 0.0)
+            if existing else -1.0
+        )
+
+        if existing is None or row_score > existing_score:
+            best_rows[key] = row
+
+    refs_to_fetch = [
+        {"source_id": sid, "chunk_index": idx}
+        for sid, idx in best_rows.keys()
+    ]
+
+    chunks = get_chunks_by_refs(refs_to_fetch)
+
+    row_by_key = {
+        (str(row.get("source_id") or ""), int(row.get("chunk_index") or 0)): row
+        for row in best_rows.values()
+    }
+
+    scored: list[dict[str, Any]] = []
+
+    for chunk in chunks:
+        key = hit_key(chunk)
+        row = row_by_key.get(key, {})
+        ref = row.get("query_reference") or {}
+        named_context = str(ref.get("named_context") or "")
+
+        heading_blob = " ".join(
+            [
+                str(chunk.get("heading") or ""),
+                str(chunk.get("parent_title") or ""),
+                str(chunk.get("heading_path") or ""),
+                str(row.get("heading") or ""),
+                str(row.get("named_context") or ""),
+            ]
+        )
+
+        context_match = bool(row.get("parent_region_match")) or bool(row.get("named_context_match")) or (
+            bool(named_context) and context_matches(heading_blob, named_context)
+        )
+
+        item = dict(chunk)
+        item["score"] = 0.999 if row.get("parent_region_match") else (0.995 if context_match else (0.82 if named_context else 0.91))
+        item["retrieval_channel"] = "structured_reference_index"
+        item["structured_reference"] = ref.get("reference_label") or row.get("reference_label")
+        item["structured_reference_context_match"] = context_match
+        item["parent_region_match"] = bool(row.get("parent_region_match"))
+        item["parent_region_title"] = row.get("parent_region_title") or item.get("parent_title")
+        item["parent_region_key"] = row.get("parent_region_key") or item.get("parent_region_key")
+        item["adaptive_retrieval"] = True
+        item["retrieval_mode"] = "structured_reference_retrieval"
+        item["retrieval_speed"] = retrieval_plan.get("retrieval_speed", "normal")
+        item["retriever_used"] = "chunk reference index + neighbours"
+        item["query_shape"] = "structured_reference"
+        item["reranker_used"] = False
+        item["neighbour_window"] = 1
+        item["retrieval_planner_reason"] = "Structured reference lookup used ingestion-time reference metadata before vector fallback."
+        item["retrieval_trace"] = {
+            "query_shape": "structured_reference",
+            "retrieval_mode": "structured_reference_retrieval",
+            "detected_references": refs,
+            "metadata_rows": len(all_rows),
+            "selected_chunk": item.get("chunk_index"),
+            "parent_region_match": bool(row.get("parent_region_match")),
+            "parent_region_title": row.get("parent_region_title") or item.get("parent_title"),
+            "parent_region_candidates": row.get("parent_region_candidates") or [],
+            "fallback_used": False,
+        }
+
+        scored.append(item)
+
+    scored = dedupe_hits(scored)
+
+    scored.sort(
+        key=lambda item: (
+            bool(item.get("structured_reference_context_match")),
+            normalize_score(item.get("score", 0.0)),
+            -int(item.get("chunk_index") or 0),
+        ),
+        reverse=True,
+    )
+
+    if scored:
+        expanded = expand_neighbour_chunks(scored[:safe_limit], neighbour_window=1)
+        expanded.sort(key=lambda item: normalize_score(item.get("score", 0.0)), reverse=True)
+        return expanded[:safe_limit]
+
+    return []
+
 def adaptive_hybrid_retrieve(
     *,
     query: str,
@@ -1592,6 +1823,7 @@ def adaptive_hybrid_retrieve(
     ]
 
     retrieval_mode = str(retrieval_plan.get("retrieval_mode") or "")
+    structured_fallback_trace: dict[str, Any] | None = None
 
     if retrieval_mode == "exact_phrase_search" and exact_phrases:
         return _exact_phrase_retrieve(
@@ -1637,6 +1869,29 @@ def adaptive_hybrid_retrieve(
         )
         if entity_hits:
             return entity_hits
+
+    if retrieval_mode == "structured_reference_retrieval" or retrieval_plan.get("query_shape") == "structured_reference":
+        detected_structured_refs = extract_query_references(query)
+        structured_hits = _structured_reference_retrieve(
+            query=query,
+            retrieval_plan=retrieval_plan,
+            limit=safe_limit,
+            source_id=source_id,
+            source_type=source_type,
+            file_type=file_type,
+            allowed_source_ids=allowed_source_ids,
+        )
+        if structured_hits:
+            return structured_hits
+
+        structured_fallback_trace = {
+            "query_shape": "structured_reference",
+            "retrieval_mode": "structured_reference_retrieval",
+            "detected_references": detected_structured_refs,
+            "metadata_lookup_returned_hits": False,
+            "fallback_used": True,
+            "fallback_reason": "Structured reference metadata lookup did not produce usable chunks; falling back to configured keyword/vector retrieval.",
+        }
 
     if retrieval_mode in {"section_retrieval", "section_topic_retrieval"}:
         section_hits = _scan_sources_for_section_reference(
@@ -1744,6 +1999,8 @@ def adaptive_hybrid_retrieve(
     else:
         retriever_used = "none"
 
+    selected_chunk_indexes = [hit.get("chunk_index") for hit in final_hits]
+
     for hit in final_hits:
         hit.setdefault("adaptive_retrieval", True)
         hit.setdefault("retrieval_mode", retrieval_plan.get("retrieval_mode", "vector_rerank"))
@@ -1753,5 +2010,16 @@ def adaptive_hybrid_retrieve(
         hit.setdefault("reranker_used", bool(use_reranker))
         hit.setdefault("neighbour_window", int(retrieval_plan.get("neighbour_window", 0) or 0))
         hit.setdefault("retrieval_planner_reason", retrieval_plan.get("planner_reason", ""))
+
+        if structured_fallback_trace is not None:
+            hit["structured_reference_fallback"] = True
+            hit["retrieval_trace"] = {
+                **structured_fallback_trace,
+                "fallback_retriever_used": retriever_used,
+                "selected_chunk_indexes": selected_chunk_indexes,
+                "candidate_count_after_merge": len(all_hits),
+                "clustered_count": len(clustered),
+                "final_count": len(final_hits),
+            }
 
     return final_hits

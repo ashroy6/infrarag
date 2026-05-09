@@ -750,8 +750,8 @@ def build_adaptive_retrieval_plan(
     if _looks_like_section_reference(clean_query) or question_type in {"section_summary", "section_reference"}:
         plan.update(
             {
-                "query_shape": "section_summary",
-                "retrieval_mode": "section_retrieval",
+                "query_shape": "structured_reference",
+                "retrieval_mode": "structured_reference_retrieval",
                 "candidate_top_k": max(plan["candidate_top_k"], 70),
                 "final_top_k": max(plan["final_top_k"], 10),
                 "keyword_top_k": 60,

@@ -92,9 +92,21 @@ def index_source(source_id: str) -> dict[str, Any]:
             if not text:
                 continue
 
+            reference_text = " ".join(
+                str(item)
+                for item in (chunk.get("reference_labels") or [])
+                if str(item).strip()
+            )
+            heading_text = " ".join(
+                str(chunk.get(key) or "")
+                for key in ("heading", "parent_title", "heading_path", "section_number", "reference_type")
+                if str(chunk.get(key) or "").strip()
+            )
+            indexed_text = "\n".join(part for part in (reference_text, heading_text, text) if part.strip())
+
             rows.append(
                 (
-                    text,
+                    indexed_text,
                     str(chunk.get("source_id") or clean_source_id),
                     str(chunk.get("source") or ""),
                     str(chunk.get("source_type") or ""),

@@ -107,6 +107,76 @@ def _looks_like_file_question(q: str) -> bool:
     )
 
 
+
+
+def _source_scoped_question_body(q: str) -> str | None:
+    """
+    Detect questions like:
+    - In bible.txt, who created the heaven and the earth?
+    - In bible.txt, summarise Genesis chapter 1.
+    - From 01-small-novel.md, who is Mira?
+
+    These are NOT file-explanation requests. They are normal RAG questions
+    scoped to one source.
+    """
+    pattern = (
+        r"^\s*(?:in|from|inside|within|using)\s+"
+        r"[`'\"]?"
+        r"[a-zA-Z0-9_\-./]+"
+        r"(?:\.(?:pdf|docx|md|txt|rst|py|js|ts|tsx|jsx|json|yaml|yml|tf|sh|sql|html|css)|dockerfile)"
+        r"[`'\"]?"
+        r"\s*,?\s+"
+        r"(?P<body>.+?)\s*$"
+    )
+
+    match = re.match(pattern, q, flags=re.IGNORECASE)
+    if not match:
+        return None
+
+    body = _clean(match.group("body"))
+
+    content_question_starts = (
+        "who ",
+        "what ",
+        "where ",
+        "when ",
+        "which ",
+        "why ",
+        "how ",
+        "is ",
+        "are ",
+        "was ",
+        "were ",
+        "do ",
+        "does ",
+        "did ",
+        "can ",
+        "could ",
+        "should ",
+        "summarize ",
+        "summarise ",
+        "summary ",
+        "explain ",
+        "describe ",
+        "compare ",
+        "find ",
+        "show ",
+        "list ",
+        "give ",
+        "tell ",
+        "name ",
+    )
+
+    if body.startswith(content_question_starts):
+        return body
+
+    return None
+
+
+def _looks_like_source_scoped_content_question(q: str) -> bool:
+    return _source_scoped_question_body(q) is not None
+
+
 def _looks_like_repo_question(q: str) -> bool:
     repo_markers = (
         "repo",
@@ -512,6 +582,65 @@ def decide_intent(question: str, chat_context: str = "") -> dict[str, Any]:
     q = _clean(question)
 
     # 1. Hard rules first. Do not waste time calling Ollama planner for obvious cases.
+
+    # Source-scoped content questions must stay in normal RAG.
+    # Example: "In bible.txt, summarise Genesis chapter 1" means:
+    # answer from inside bible.txt, not explain the whole bible.txt file.
+    if _looks_like_source_scoped_content_question(q):
+        if _looks_like_comparison_question(q):
+            return _base_response(
+                pipeline="long_explanation",
+                question=question,
+                reason="Rules-first router selected long explanation because the question compares content inside a specific source.",
+                confidence=0.9,
+                answer_length="long",
+                needs_all_chunks=False,
+                candidate_top_k=70,
+                final_top_k=10,
+                source_strategy="allow_multiple_sources",
+                question_type="comparison",
+            )
+
+        if _looks_like_section_reference_question(q):
+            return _base_response(
+                pipeline="normal_qa",
+                question=question,
+                reason="Rules-first router selected normal Q&A because the question asks about a chapter, section, or numbered part inside a specific source.",
+                confidence=0.92,
+                answer_length="balanced",
+                needs_all_chunks=False,
+                candidate_top_k=80,
+                final_top_k=12,
+                source_strategy="cluster_by_best_source",
+                question_type="section_summary",
+            )
+
+        if _looks_like_topic_summary(q):
+            return _base_response(
+                pipeline="normal_qa",
+                question=question,
+                reason="Rules-first router selected normal Q&A because the question asks for a source-scoped topic summary, not a whole-file explanation.",
+                confidence=0.9,
+                answer_length="balanced",
+                needs_all_chunks=False,
+                candidate_top_k=60,
+                final_top_k=8,
+                source_strategy="cluster_by_best_source",
+                question_type="topic_summary",
+            )
+
+        return _base_response(
+            pipeline="normal_qa",
+            question=question,
+            reason="Rules-first router selected normal Q&A because the question is scoped to a source but asks about content inside it.",
+            confidence=0.9,
+            answer_length="balanced",
+            needs_all_chunks=False,
+            candidate_top_k=50,
+            final_top_k=8,
+            source_strategy="cluster_by_best_source",
+            question_type="source_scoped_qa",
+        )
 
     if _looks_like_file_question(q):
         return _base_response(

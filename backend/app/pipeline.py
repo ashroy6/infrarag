@@ -19,7 +19,9 @@ from app.incremental_ingest import collect_changed_files
 from app.ingestion_progress import is_ingestion_cancelled, update_ingestion_progress
 from app.keyword_index import index_source
 from app.metadata_db import MetadataDB
+from app.parent_region_indexer import build_parent_regions_and_enrich_chunks
 from app.pdf_parser import parse_pdf_file, supports as supports_pdf
+from app.reference_extractor import enrich_chunks_with_references
 from app.qdrant_client import (
     QDRANT_COLLECTION,
     delete_points_by_source_id,
@@ -545,7 +547,18 @@ def ingest_paths(
                 progress_percent=12,
             )
 
-            chunks = chunk_parsed_content(parsed)
+            chunks = enrich_chunks_with_references(
+                chunk_parsed_content(parsed),
+                source_id=source_id,
+                source_path=file_path,
+            )
+
+            parent_region_payload = build_parent_regions_and_enrich_chunks(
+                source_id=source_id,
+                chunks=chunks,
+            )
+            chunks = parent_region_payload.get("chunks", chunks)
+            parent_regions = parent_region_payload.get("parent_regions", [])
 
             update_ingestion_progress(
                 stage=f"embedding:{Path(file_path).name}",
@@ -614,6 +627,29 @@ def ingest_paths(
                 if chunk_info.get("page_end") is not None:
                     payload["page_end"] = chunk_info["page_end"]
 
+                for meta_key in (
+                    "chunk_strategy",
+                    "reference_labels",
+                    "references",
+                    "section_number",
+                    "section_start",
+                    "section_end",
+                    "subsection_start",
+                    "subsection_end",
+                    "reference_type",
+                    "heading",
+                    "parent_title",
+                    "parent_id",
+                    "heading_path",
+                    "prev_chunk_index",
+                    "next_chunk_index",
+                    "parent_region_type",
+                    "parent_region_key",
+                    "parent_region_confidence",
+                ):
+                    if meta_key in chunk_info and chunk_info.get(meta_key) not in (None, "", []):
+                        payload[meta_key] = chunk_info.get(meta_key)
+
                 points_batch.append(
                     PointStruct(
                         id=point_id,
@@ -633,6 +669,13 @@ def ingest_paths(
                         "chunk_index": idx,
                         "qdrant_point_id": point_id,
                         "text_preview": f"{preview_prefix}{chunk_text[:200]}",
+                        "references": chunk_info.get("references", []),
+                        "heading": chunk_info.get("heading", ""),
+                        "parent_title": chunk_info.get("parent_title", ""),
+                        "parent_id": chunk_info.get("parent_id", ""),
+                        "parent_region_type": chunk_info.get("parent_region_type", ""),
+                        "parent_region_key": chunk_info.get("parent_region_key", ""),
+                        "parent_region_confidence": chunk_info.get("parent_region_confidence", ""),
                     }
                 )
 
@@ -705,6 +748,7 @@ def ingest_paths(
                 agent_access_enabled=ingest_metadata["agent_access_enabled"],
                 knowledge_source_id=ingest_metadata["knowledge_source_id"],
             )
+            metadata_db.replace_parent_regions(source_id=source_id, parent_regions=parent_regions)
             metadata_db.replace_chunks(source_id=source_id, chunk_records=chunk_records)
 
             try:

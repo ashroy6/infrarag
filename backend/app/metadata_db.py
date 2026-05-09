@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import uuid
 from pathlib import Path
@@ -251,7 +252,51 @@ class MetadataDB:
                 """
             )
 
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chunk_references (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    reference_label TEXT NOT NULL,
+                    reference_type TEXT DEFAULT '',
+                    section_number TEXT DEFAULT '',
+                    subsection_number TEXT DEFAULT '',
+                    named_context TEXT DEFAULT '',
+                    heading TEXT DEFAULT '',
+                    parent_id TEXT DEFAULT '',
+                    score REAL DEFAULT 1.0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(source_id) REFERENCES files(source_id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS parent_regions (
+                    parent_id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL,
+                    parent_type TEXT DEFAULT '',
+                    parent_title TEXT DEFAULT '',
+                    parent_key TEXT DEFAULT '',
+                    start_chunk_index INTEGER NOT NULL,
+                    end_chunk_index INTEGER NOT NULL,
+                    confidence REAL DEFAULT 0.0,
+                    metadata_json TEXT DEFAULT '{}',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(source_id) REFERENCES files(source_id) ON DELETE CASCADE
+                )
+                """
+            )
+
             conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_source_id ON chunks(source_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunk_refs_source_section ON chunk_references(source_id, section_number)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunk_refs_source_label ON chunk_references(source_id, reference_label)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunk_refs_source_chunk ON chunk_references(source_id, chunk_index)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_parent_regions_source ON parent_regions(source_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_parent_regions_key ON parent_regions(source_id, parent_key)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_parent_regions_range ON parent_regions(source_id, start_chunk_index, end_chunk_index)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_files_status ON files(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_files_source_type ON files(source_type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_files_file_hash ON files(file_hash)")
@@ -382,6 +427,7 @@ class MetadataDB:
         chunk_records: list[dict[str, Any]],
     ) -> None:
         with self._connect() as conn:
+            conn.execute("DELETE FROM chunk_references WHERE source_id = ?", (source_id,))
             conn.execute("DELETE FROM chunks WHERE source_id = ?", (source_id,))
             conn.executemany(
                 """
@@ -401,6 +447,44 @@ class MetadataDB:
                     for record in chunk_records
                 ],
             )
+
+            reference_rows: list[tuple[Any, ...]] = []
+            for record in chunk_records:
+                for ref in record.get("references", []) or []:
+                    reference_rows.append(
+                        (
+                            source_id,
+                            int(record.get("chunk_index") or 0),
+                            str(ref.get("reference_label") or ""),
+                            str(ref.get("reference_type") or ""),
+                            str(ref.get("section_number") or ""),
+                            str(ref.get("subsection_number") or ""),
+                            str(ref.get("named_context") or record.get("parent_title") or ""),
+                            str(record.get("heading") or record.get("parent_title") or ""),
+                            str(record.get("parent_id") or ""),
+                            float(ref.get("confidence") or 1.0),
+                        )
+                    )
+
+            if reference_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO chunk_references (
+                        source_id,
+                        chunk_index,
+                        reference_label,
+                        reference_type,
+                        section_number,
+                        subsection_number,
+                        named_context,
+                        heading,
+                        parent_id,
+                        score
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    reference_rows,
+                )
 
     def get_file(self, source_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -488,6 +572,8 @@ class MetadataDB:
 
     def delete_file_and_chunks(self, source_id: str) -> None:
         with self._connect() as conn:
+            conn.execute("DELETE FROM chunk_references WHERE source_id = ?", (source_id,))
+            conn.execute("DELETE FROM parent_regions WHERE source_id = ?", (source_id,))
             conn.execute("DELETE FROM chunks WHERE source_id = ?", (source_id,))
             conn.execute("DELETE FROM files WHERE source_id = ?", (source_id,))
 
@@ -503,6 +589,194 @@ class MetadataDB:
                 (source_id,),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def search_chunk_references(
+        self,
+        *,
+        source_id: str | None = None,
+        section_number: str | None = None,
+        subsection_number: str | None = None,
+        reference_label: str | None = None,
+        named_context: str | None = None,
+        parent_ids: list[str] | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM chunk_references WHERE 1=1"
+        params: list[Any] = []
+
+        if source_id:
+            query += " AND source_id = ?"
+            params.append(source_id)
+        if section_number:
+            query += " AND section_number = ?"
+            params.append(str(section_number))
+        if subsection_number:
+            query += " AND subsection_number = ?"
+            params.append(str(subsection_number))
+        if reference_label:
+            query += " AND lower(reference_label) = lower(?)"
+            params.append(str(reference_label))
+
+        clean_parent_ids = [str(pid).strip() for pid in (parent_ids or []) if str(pid).strip()]
+        if clean_parent_ids:
+            placeholders = ",".join("?" for _ in clean_parent_ids)
+            query += f" AND parent_id IN ({placeholders})"
+            params.extend(clean_parent_ids)
+
+        query += " ORDER BY score DESC, chunk_index ASC LIMIT ?"
+        params.append(max(1, min(int(limit or 20), 200)))
+
+        def norm_terms(value: str) -> set[str]:
+            terms = set()
+            for token in re.findall(r"[A-Za-z0-9]+", str(value or "").lower()):
+                if len(token) > 3 and token.endswith("s"):
+                    token = token[:-1]
+                if token:
+                    terms.add(token)
+            return terms
+
+        wanted_terms = norm_terms(named_context or "")
+
+        with self._connect() as conn:
+            rows = [dict(row) for row in conn.execute(query, params).fetchall()]
+
+        if wanted_terms:
+            for row in rows:
+                haystack_terms = norm_terms(" ".join([
+                    str(row.get("named_context") or ""),
+                    str(row.get("heading") or ""),
+                    str(row.get("parent_id") or ""),
+                ]))
+                overlap = bool(wanted_terms.intersection(haystack_terms))
+                row["named_context_match"] = overlap
+                row["context_score"] = 1.0 if overlap else 0.0
+
+            rows.sort(
+                key=lambda item: (
+                    float(item.get("context_score") or 0.0),
+                    float(item.get("score") or 0.0),
+                    -int(item.get("chunk_index") or 0),
+                ),
+                reverse=True,
+            )
+
+        return rows[: max(1, min(int(limit or 20), 200))]
+
+    def replace_parent_regions(
+        self,
+        source_id: str,
+        parent_regions: list[dict[str, Any]],
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM parent_regions WHERE source_id = ?", (source_id,))
+
+            rows: list[tuple[Any, ...]] = []
+            for region in parent_regions or []:
+                parent_id = str(region.get("parent_id") or "").strip()
+                if not parent_id:
+                    continue
+
+                rows.append(
+                    (
+                        parent_id,
+                        source_id,
+                        str(region.get("parent_type") or ""),
+                        str(region.get("parent_title") or ""),
+                        str(region.get("parent_key") or ""),
+                        int(region.get("start_chunk_index") or 0),
+                        int(region.get("end_chunk_index") or 0),
+                        float(region.get("confidence") or 0.0),
+                        self._json_dump(region.get("metadata") or {}),
+                    )
+                )
+
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT INTO parent_regions (
+                        parent_id,
+                        source_id,
+                        parent_type,
+                        parent_title,
+                        parent_key,
+                        start_chunk_index,
+                        end_chunk_index,
+                        confidence,
+                        metadata_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+
+    @staticmethod
+    def _normal_parent_terms(value: str) -> set[str]:
+        terms: set[str] = set()
+        for token in re.findall(r"[A-Za-z0-9]+", str(value or "").lower()):
+            if len(token) > 3 and token.endswith("s"):
+                token = token[:-1]
+            if token:
+                terms.add(token)
+        return terms
+
+    def search_parent_regions(
+        self,
+        *,
+        source_id: str,
+        named_context: str,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        wanted_terms = self._normal_parent_terms(named_context)
+        if not source_id or not wanted_terms:
+            return []
+
+        safe_limit = max(1, min(int(limit or 20), 100))
+
+        with self._connect() as conn:
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM parent_regions
+                    WHERE source_id = ?
+                    ORDER BY start_chunk_index ASC
+                    """,
+                    (source_id,),
+                ).fetchall()
+            ]
+
+        scored: list[dict[str, Any]] = []
+
+        for row in rows:
+            haystack = " ".join(
+                [
+                    str(row.get("parent_title") or ""),
+                    str(row.get("parent_key") or ""),
+                    str(row.get("parent_type") or ""),
+                ]
+            )
+            region_terms = self._normal_parent_terms(haystack)
+            overlap = wanted_terms.intersection(region_terms)
+
+            if not overlap:
+                continue
+
+            score = len(overlap) / max(len(wanted_terms), 1)
+            row["context_score"] = round(score, 6)
+            row["matched_terms"] = sorted(overlap)
+            scored.append(row)
+
+        scored.sort(
+            key=lambda item: (
+                float(item.get("context_score") or 0.0),
+                float(item.get("confidence") or 0.0),
+                -int(item.get("start_chunk_index") or 0),
+            ),
+            reverse=True,
+        )
+
+        return scored[:safe_limit]
 
     # ---------------------------------------------------------------------
     # Knowledge source methods

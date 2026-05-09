@@ -42,6 +42,33 @@ def compact_chunks(
     return compacted
 
 
+def _format_reference_meta(chunk: dict[str, Any]) -> str:
+    parts: list[str] = []
+
+    if chunk.get("structured_reference"):
+        parts.append(f"MatchedRef={chunk.get('structured_reference')}")
+
+    if chunk.get("reference_labels"):
+        labels = chunk.get("reference_labels") or []
+        if isinstance(labels, list) and labels:
+            parts.append("Refs=" + ", ".join(str(x) for x in labels[:12]))
+
+    for key, label in (
+        ("heading", "Heading"),
+        ("parent_title", "Parent"),
+        ("heading_path", "Path"),
+        ("section_number", "Section"),
+        ("subsection_start", "SubsectionStart"),
+        ("subsection_end", "SubsectionEnd"),
+        ("reference_type", "RefType"),
+    ):
+        value = chunk.get(key)
+        if value not in (None, "", []):
+            parts.append(f"{label}={value}")
+
+    return " | ".join(parts)
+
+
 def build_context_text(chunks: list[dict[str, Any]]) -> str:
     parts: list[str] = []
 
@@ -53,14 +80,17 @@ def build_context_text(chunks: list[dict[str, Any]]) -> str:
             page_info = f" | Pages: {chunk['page_start']}-{chunk['page_end']}"
 
         score = float(chunk.get("score", 0.0) or 0.0)
+        reference_info = _format_reference_meta(chunk)
+        reference_line = f" | {reference_info}" if reference_info else ""
 
         parts.append(
-            "[Source: {source} | Source ID: {source_id} | Chunk: {chunk_index}{page_info} | Score: {score:.4f}]\n{text}".format(
+            "[Source: {source} | Source ID: {source_id} | Chunk: {chunk_index}{page_info} | Score: {score:.4f}{reference_line}]\n{text}".format(
                 source=chunk.get("source", "unknown"),
                 source_id=chunk.get("source_id", ""),
                 chunk_index=chunk.get("chunk_index", -1),
                 page_info=page_info,
                 score=score,
+                reference_line=reference_line,
                 text=chunk.get("text", ""),
             )
         )
@@ -81,6 +111,32 @@ def build_citations(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "file_type": chunk.get("file_type", ""),
             "source_type": chunk.get("source_type", ""),
         }
+
+        for key in (
+            "chunk_strategy",
+            "reference_labels",
+            "references",
+            "section_number",
+            "section_start",
+            "section_end",
+            "subsection_start",
+            "subsection_end",
+            "reference_type",
+            "heading",
+            "parent_title",
+            "parent_id",
+            "heading_path",
+            "prev_chunk_index",
+            "next_chunk_index",
+            "structured_reference",
+            "structured_reference_context_match",
+            "structured_reference_fallback",
+            "retrieval_channel",
+            "retrieval_planner_reason",
+        ):
+            value = chunk.get(key)
+            if value not in (None, "", []):
+                item[key] = value
 
         if chunk.get("page_number") is not None:
             item["page_number"] = chunk.get("page_number")
