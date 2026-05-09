@@ -1140,7 +1140,7 @@
       try {
         buildGraphBtn.disabled = true;
         setActionMessage("Building graph. This may take time for large sources...");
-        const result = await postJson("/admin/source/" + encodeURIComponent(latestSource.source_id) + "/build-graph");
+        const result = await postJson("/api/graph/rebuild-source/" + encodeURIComponent(latestSource.source_id) + "?max_chunks_per_source=1200");
         setActionMessage("Graph build complete: " + JSON.stringify(result.result || result));
         await refreshIngestionStatus();
       } catch (err) {

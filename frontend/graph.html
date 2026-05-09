@@ -296,8 +296,8 @@
     }
 
     .dot.file { background: var(--blue); }
-    .dot.chunk { background: var(--purple); }
-    .dot.chapter { background: #d946ef; }
+    .dot.chunk { background: #ffffff; box-shadow: 0 0 5px rgba(255,255,255,0.45); }
+    .dot.chapter { background: #1e40af; }
     .dot.section { background: #84cc16; }
     .dot.concept { background: var(--green); }
     .dot.service { background: var(--yellow); }
@@ -893,8 +893,8 @@
 
     const nodeColors = {
       file: "#3b82f6",
-      chunk: "#a855f7",
-      chapter: "#ec4899",
+      chunk: "#ffffff",
+      chapter: "#1e40af",
       section: "#84cc16",
       concept: "#22c55e",
       service: "#facc15",
@@ -1004,6 +1004,16 @@
           "text-margin-y": dense ? 4 : 8,
           "overlay-padding": dense ? 3 : 8,
           "z-index": 10
+        })
+        .selector("node[type = 'chunk']")
+        .style({
+          "background-color": "#ffffff",
+          "border-width": 0,
+          "border-opacity": 0,
+          "shadow-blur": 0,
+          "shadow-opacity": 0,
+          "shadow-offset-x": 0,
+          "shadow-offset-y": 0
         })
         .selector("node[type = 'file']")
         .style({
@@ -1435,6 +1445,18 @@
                 "text-valign": "bottom",
                 "text-halign": "center",
                 "text-margin-y": 8
+              }
+            },
+            {
+              selector: "node[type = 'chunk']",
+              style: {
+                "background-color": "#ffffff",
+                "border-width": 0,
+                "border-opacity": 0,
+                "shadow-blur": 0,
+                "shadow-opacity": 0,
+                "shadow-offset-x": 0,
+                "shadow-offset-y": 0
               }
             },
             {
