@@ -8,5 +8,5 @@ jobs:
     name: CI disabled
     runs-on: ubuntu-latest
     steps:
-      - name: Confirm CI is manual only
+      - name: Confirm manual-only workflow
         run: echo "Automatic CI is disabled. This workflow only runs manually."
