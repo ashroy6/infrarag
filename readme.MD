@@ -1707,7 +1707,7 @@ curl http://localhost:8000/health
 docker logs -f infrarag-backend
 ```
 
-After cloning InfraRAG, each user must ingest their own files or upload documents through the UI. The GitHub repo contains the application code, not a prebuilt private knowledge base.
+ ### After cloning InfraRAG, each user must ingest their own files or upload documents through the UI. The GitHub repo contains the application code, not a prebuilt private knowledge base.
 
 ---
 
