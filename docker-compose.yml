@@ -2,7 +2,6 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: infrarag-ollama
-    gpus: all
     ports:
       - "11435:11434"
     volumes:
