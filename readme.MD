@@ -1616,36 +1616,95 @@ Currently not supported directly:
 
 ## How to Start InfraRAG
 
+Clone the repo:
+
 ```bash
 git clone https://github.com/ashroy6/infrarag.git
 cd infrarag
+```
+
+### Start on a normal laptop / CPU machine
+
+Use this on machines without an NVIDIA GPU:
+
+```bash
 docker compose up -d
+```
+
+### Start on an NVIDIA GPU machine
+
+Use this on machines with NVIDIA GPU support configured in Docker:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+```
+
+The base `docker-compose.yml` is CPU-safe and works on all machines.  
+The optional `docker-compose.gpu.yml` file is only for GPU-enabled machines.
+
+### Pull required Ollama models
+
+Run this after the containers are up:
+
+```bash
 docker compose exec ollama ollama pull nomic-embed-text
 docker compose exec ollama ollama pull llama3.2:3b
 ```
 
-Open the app:
+### Open the app
 
 ```text
 http://localhost:8080
 ```
 
-Open the admin page:
+### Open the admin page
 
 ```text
 http://localhost:8080/admin.html
 ```
 
-Open the graph page:
+### Open the graph page
 
 ```text
 http://localhost:8080/graph.html
 ```
 
-Open Agent Studio:
+### Open Agent Studio
 
 ```text
 http://localhost:8080/agents.html
+```
+
+### Useful local observability pages
+
+Prometheus:
+
+```text
+http://localhost:9090
+```
+
+Grafana:
+
+```text
+http://localhost:3001
+```
+
+### Check container status
+
+```bash
+docker ps
+```
+
+### Check backend health
+
+```bash
+curl http://localhost:8000/health
+```
+
+### View live backend logs
+
+```bash
+docker logs -f infrarag-backend
 ```
 
 After cloning InfraRAG, each user must ingest their own files or upload documents through the UI. The GitHub repo contains the application code, not a prebuilt private knowledge base.
