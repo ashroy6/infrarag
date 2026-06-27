@@ -1,0 +1,170 @@
+/*
+  InfraRAG shared shell
+  Purpose: one consistent page navigation across Chat, Admin, Graph, and Agent Studio.
+  This file intentionally does not replace page-specific layouts.
+*/
+
+:root {
+  --im-shell-bg: #111111;
+  --im-shell-panel: #171717;
+  --im-shell-border: #2a2a2a;
+  --im-shell-text: #f3f4f6;
+  --im-shell-muted: #9ca3af;
+  --im-shell-accent: #10a37f;
+}
+
+.im-shell-nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 56px;
+  z-index: 99999;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 16px;
+  background: var(--im-shell-bg);
+  border-bottom: 1px solid var(--im-shell-border);
+  color: var(--im-shell-text);
+  font-family: Arial, sans-serif;
+  box-sizing: border-box;
+}
+
+.im-shell-brand {
+  display: flex;
+  flex-direction: column;
+  min-width: 155px;
+  line-height: 1.1;
+}
+
+.im-shell-brand-main {
+  font-size: 17px;
+  font-weight: 800;
+  color: #ffffff;
+}
+
+.im-shell-brand-main span {
+  color: var(--im-shell-accent);
+}
+
+.im-shell-brand-sub {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--im-shell-muted);
+}
+
+.im-shell-links {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.im-shell-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 7px 11px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  color: var(--im-shell-text);
+  background: transparent;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.im-shell-link:hover {
+  background: #202020;
+  border-color: #333333;
+  color: #ffffff;
+}
+
+.im-shell-link.active {
+  background: rgba(16, 163, 127, 0.18);
+  border-color: var(--im-shell-accent);
+  color: #ffffff;
+}
+
+.im-shell-spacer {
+  flex: 1;
+}
+
+.im-shell-page-label {
+  color: var(--im-shell-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Pages that already use a full-height .app layout */
+body.im-has-app .app {
+  height: calc(100vh - 56px) !important;
+  margin-top: 56px !important;
+}
+
+/* Admin page does not use .app */
+body.im-no-app {
+  padding-top: 76px !important;
+}
+
+/* Remove duplicate old page navigation after shared shell is enabled */
+body.im-shell-page-chat .sidebar-header .admin-link {
+  display: none !important;
+}
+
+body.im-shell-page-admin .topbar a {
+  display: none !important;
+}
+
+body.im-shell-page-graph header.topbar nav.nav {
+  display: none !important;
+}
+
+body.im-shell-page-agents .sidebar .nav {
+  display: none !important;
+}
+
+/* Avoid Graph page topbar fighting with global shell */
+body.im-shell-page-graph .app {
+  grid-template-rows: 58px 1fr;
+}
+
+/* Mobile */
+@media (max-width: 760px) {
+  .im-shell-nav {
+    height: auto;
+    min-height: 56px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+  }
+
+  .im-shell-brand {
+    min-width: 120px;
+  }
+
+  .im-shell-links {
+    gap: 6px;
+  }
+
+  .im-shell-link {
+    font-size: 12px;
+    min-height: 30px;
+    padding: 6px 8px;
+  }
+
+  .im-shell-page-label {
+    display: none;
+  }
+
+  body.im-has-app .app {
+    height: calc(100vh - 72px) !important;
+    margin-top: 72px !important;
+  }
+
+  body.im-no-app {
+    padding-top: 92px !important;
+  }
+}
